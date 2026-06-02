@@ -1,0 +1,1044 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SS13 Translation Review</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #1a1b26; --surface: #24283b; --border: #3b4261;
+  --text: #c0caf5; --dim: #565f89; --accent: #7aa2f7;
+  --green: #9ece6a; --yellow: #e0af68; --red: #f7768e;
+  --orange: #ff9e64; --purple: #bb9af7;
+  --orig: var(--green); --trns: var(--yellow);
+  --llm: var(--purple); --user: var(--accent);
+  --broken: var(--red);
+}
+html, body { height: 100%; font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+#app { display: flex; flex-direction: column; height: 100%; }
+
+/* Header */
+#header { display: flex; align-items: center; padding: 8px 16px; background: var(--surface); border-bottom: 1px solid var(--border); gap: 16px; }
+#header h1 { font-size: 16px; font-weight: 700; color: var(--accent); }
+#header .subtitle { color: var(--dim); font-size: 12px; }
+#header .actions { margin-left: auto; display: flex; gap: 8px; }
+.btn { padding: 4px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); cursor: pointer; font-size: 12px; }
+.btn:hover { background: var(--border); }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.btn-primary { border-color: var(--accent); color: var(--accent); }
+
+/* Status bar */
+#status-bar { display: flex; align-items: center; padding: 4px 16px; background: var(--surface); border-bottom: 1px solid var(--border); font-size: 12px; color: var(--dim); gap: 16px; flex-wrap: wrap; }
+#status-bar .stat { display: inline-flex; align-items: center; gap: 4px; }
+#status-bar .llm-indicator { margin-left: auto; }
+.llm-on { color: var(--green); }
+.llm-off { color: var(--red); }
+
+/* Main content */
+#main { display: flex; flex: 1; overflow: hidden; }
+
+/* Tree panel */
+#tree-panel { width: 360px; min-width: 240px; border-right: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface); }
+#tree-panel h2 { padding: 8px 12px; font-size: 12px; text-transform: uppercase; color: var(--dim); letter-spacing: 1px; border-bottom: 1px solid var(--border); }
+#tree-container { flex: 1; overflow-y: auto; padding: 4px 0; }
+
+.tree-node { padding: 2px 0; cursor: pointer; user-select: none; white-space: nowrap; }
+.tree-node:hover { background: rgba(122,162,247,0.1); }
+.tree-node.selected { background: rgba(122,162,247,0.2); }
+.tree-node .icon { display: inline-block; width: 18px; text-align: center; color: var(--dim); flex-shrink: 0; }
+.tree-node .name { color: var(--text); font-size: 13px; }
+.tree-node.dir > .name { color: var(--accent); font-weight: 600; }
+.tree-children { display: none; }
+.tree-children.open { display: block; }
+.tree-node .summary { color: var(--dim); font-size: 11px; margin-left: 6px; }
+
+/* Content panel */
+#content-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+#content-panel h2 { padding: 8px 12px; font-size: 12px; text-transform: uppercase; color: var(--dim); letter-spacing: 1px; border-bottom: 1px solid var(--border); }
+#content-panel h2 .file-path { color: var(--text); font-weight: 400; text-transform: none; letter-spacing: 0; }
+
+/* Table */
+#table-container { flex: 1; overflow-y: auto; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+thead { position: sticky; top: 0; z-index: 1; }
+th { background: var(--surface); padding: 6px 8px; text-align: left; font-size: 11px; text-transform: uppercase; color: var(--dim); letter-spacing: 1px; border-bottom: 2px solid var(--border); font-weight: 600; }
+th:nth-child(1) { width: 100px; }
+th:nth-child(2) { width: 50px; }
+th:nth-child(3) { width: 45%; }
+th:nth-child(4) { width: 45%; }
+td { padding: 4px 8px; border-bottom: 1px solid var(--border); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 0; }
+tr { cursor: pointer; }
+tr:hover td { background: rgba(122,162,247,0.05); }
+tr.selected td { background: rgba(122,162,247,0.15); }
+tr.ORIGINAL td:nth-child(1) { color: var(--green); }
+tr.TRANSLATED td:nth-child(1) { color: var(--yellow); }
+tr.LLM_TWEAKED td:nth-child(1) { color: var(--purple); }
+tr.USER_MODIFIED td:nth-child(1) { color: var(--accent); }
+tr.BROKEN td:nth-child(1) { color: var(--red); }
+td:nth-child(2) { color: var(--dim); text-align: right; }
+#empty-state { display: flex; align-items: center; justify-content: center; flex: 1; color: var(--dim); font-style: italic; }
+
+/* Detail panel */
+#detail-panel { display: none; border-top: 2px solid var(--border); background: var(--surface); padding: 0; }
+#detail-panel.open { display: block; }
+#detail-panel .detail-header { display: flex; align-items: center; padding: 8px 12px; gap: 8px; border-bottom: 1px solid var(--border); }
+#detail-panel .detail-header .file-ref { font-weight: 600; font-size: 13px; color: var(--accent); }
+#detail-panel .detail-header .status-tag { font-size: 11px; padding: 2px 6px; border-radius: 3px; }
+#detail-panel .detail-body { padding: 8px 12px; font-size: 13px; line-height: 1.5; }
+#detail-panel .detail-body .label { color: var(--dim); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-top: 6px; }
+#detail-panel .detail-body .content { font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace; background: var(--bg); padding: 4px 8px; border-radius: 3px; margin: 2px 0 6px 0; white-space: pre-wrap; word-break: break-all; }
+#detail-panel .detail-body .safe { color: var(--green); }
+#detail-panel .detail-body .unsafe { color: var(--red); }
+#detail-panel .detail-actions { padding: 6px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
+
+/* Scan placeholder */
+#scan-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 12px; padding: 32px; }
+#scan-placeholder .spinner { width: 32px; height: 32px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#scan-progress-text { color: var(--dim); font-size: 14px; }
+#scan-progress-hint { color: var(--dim); font-size: 12px; }
+#scan-progress-bar-wrap { width: 100%; max-width: 400px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+#scan-progress-bar { height: 100%; width: 0%; background: var(--accent); border-radius: 3px; transition: width 0.5s; }
+
+/* Batch progress */
+#batch-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; z-index: 999; }
+#batch-overlay.open { display: flex; }
+#batch-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 24px; min-width: 420px; max-width: 80vw; text-align: center; max-height: 80vh; display:flex;flex-direction:column; }
+#batch-box h3 { margin-bottom: 12px; }
+#batch-bar { height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; margin: 12px 0; }
+#batch-bar-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.3s; border-radius: 4px; }
+#batch-errors { color: var(--red); font-size: 12px; margin-top: 8px; max-height: 80px; overflow-y: auto; text-align: left; }
+#batch-results { flex: 1; overflow-y: auto; margin-top: 12px; text-align: left; font-size: 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); min-height: 0; }
+#batch-results table { width: 100%; border-collapse: collapse; }
+#batch-results td { padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+#batch-results tr:last-child td { border-bottom: none; }
+.batch-result-orig { color: var(--dim); max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-result-xlate { color: var(--fg); }
+
+/* LLM Queue */
+#llm-queue-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); align-items: center; justify-content: center; z-index: 998; }
+#llm-queue-overlay.open { display: flex; }
+#llm-queue-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; width: 80vw; max-width: 900px; height: 70vh; display:flex;flex-direction:column; }
+.llm-queue-file { font-weight:bold; color:var(--accent); margin: 8px 0 4px 0; font-size:13px; cursor:pointer; }
+.llm-queue-file:hover { text-decoration:underline; }
+.llm-queue-entry { padding: 3px 8px; cursor:pointer; font-size:12px; border-bottom:1px solid var(--border); display:flex; gap:6px; align-items:flex-start; }
+.llm-queue-entry:hover { background:rgba(122,162,247,0.1); }
+.llm-queue-entry .lq-line { color:var(--dim); min-width:40px; }
+.llm-queue-entry .lq-orig { color:var(--text); flex:1; }
+.llm-queue-entry .lq-trans { color:var(--llm); flex:1; }
+.llm-queue-entry .lq-safe { color:var(--green); font-size:11px; }
+
+/* Search */
+#file-search:focus, #string-search:focus { border-color: var(--accent); }
+.search-result-item { padding: 3px 8px; cursor: pointer; font-size: 13px; border-bottom: 1px solid var(--border); }
+.search-result-item:hover { background: rgba(122,162,247,0.1); }
+.search-result-item .sr-file { color: var(--accent); font-size: 11px; }
+.search-result-item .sr-text { color: var(--text); margin: 2px 0; }
+.search-result-item .sr-meta { color: var(--dim); font-size: 11px; }
+.search-result-item .sr-highlight { background: rgba(224,175,104,0.3); padding: 0 2px; border-radius: 2px; }
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <h1>SS13 Translation Review</h1>
+    <span class="subtitle" id="lang-info">en &rarr; pt-BR</span>
+    <div class="actions">
+      <button class="btn btn-primary" id="btn-apply-all" onclick="applyAll()">Apply All to Files</button>
+      <button class="btn" id="btn-save" onclick="saveCache()">Save Cache</button>
+      <button class="btn" id="btn-clear-cache" onclick="clearBadCache()">Clear Bad Cache</button>
+      <button class="btn" id="btn-refresh" onclick="rescan()">Rescan</button>
+    </div>
+  </div>
+
+  <div id="status-bar">
+    <span id="llm-status" class="llm-off">LLM: &#10007;</span>
+    <span class="stat" id="stat-files">Files: --</span>
+    <span class="stat" id="stat-lines">Lines: --</span>
+    <span class="stat" id="stat-orig" style="color:var(--orig)">&#10003; --</span>
+    <span class="stat" id="stat-trns" style="color:var(--trns)">&#8596; --</span>
+    <span class="stat" id="stat-llm" style="color:var(--llm)">&#129302; --</span>
+    <span class="stat" id="stat-user" style="color:var(--user)">&#128100; --</span>
+    <span class="stat" id="stat-broken" style="color:var(--broken)">&#10060; --</span>
+    <span class="actions" style="margin-left:auto">
+      <button class="btn" id="btn-reasoning" onclick="toggleReasoning()">Reasoning: ON</button>
+      <button class="btn" id="btn-overwrite" onclick="toggleOverwrite()" style="margin-left:4px">Overwrite: OFF</button>
+      <button class="btn" id="btn-llm-queue" onclick="showLLMQueue()" style="margin-left:4px">LLM Queue</button>
+    </span>
+  </div>
+
+  <div id="main">
+    <div id="tree-panel">
+      <h2>Files</h2>
+      <input id="file-search" type="text" placeholder="Search files..." oninput="searchFiles(this.value)" style="width:100%;padding:4px 8px;background:var(--bg);border:1px solid var(--border);color:var(--text);font-size:12px;outline:none">
+      <div id="tree-container"></div>
+      <div id="file-search-results" style="display:none;flex:1;overflow-y:auto;padding:4px 0"></div>
+    </div>
+
+    <div id="content-panel">
+      <h2 id="content-title" style="display:flex;align-items:center;gap:8px">
+        <span>Lines</span>
+        <input id="string-search" type="text" placeholder="Search strings..." oninput="searchStrings(this.value)" style="flex:1;max-width:300px;padding:2px 6px;background:var(--bg);border:1px solid var(--border);color:var(--text);font-size:12px;outline:none">
+        <button class="btn" id="btn-batch-dir" onclick="batchTranslate('dir')" style="display:none">Batch Xlate Dir (skip)</button>
+        <button class="btn" id="btn-show-llm" onclick="toggleFilter('llm')" style="font-size:11px;display:none">Show LLM only</button>
+        <button class="btn" id="btn-show-orig" onclick="toggleFilter('orig')" style="font-size:11px;display:none">Show Orig only</button>
+        <button class="btn" id="btn-show-broken" onclick="toggleFilter('broken')" style="font-size:11px;display:none">Show Broken only</button>
+        <span class="file-path" id="file-path"></span>
+      </h2>
+      <div id="string-search-results" style="display:none;flex:1;overflow-y:auto;padding:4px 0;font-size:13px"></div>
+      <div id="scan-placeholder">
+        <div class="spinner"></div>
+        <div id="scan-progress-text">Scanning project...</div>
+        <div id="scan-progress-bar-wrap"><div id="scan-progress-bar"></div></div>
+        <div id="scan-progress-hint">This may take ~20 seconds</div>
+      </div>
+      <div id="table-container" style="display:none">
+        <table>
+          <thead><tr><th>Status</th><th>#</th><th>Original</th><th>Current</th></tr></thead>
+          <tbody id="lines-body"></tbody>
+        </table>
+      </div>
+      <div id="detail-panel">
+        <div class="detail-header">
+          <span class="file-ref" id="detail-ref"></span>
+          <span class="status-tag" id="detail-status-tag"></span>
+        </div>
+        <div class="detail-body" id="detail-body"></div>
+        <div id="detail-edit" style="display:none;padding:8px 12px;border-top:1px solid var(--border)">
+          <div class="label" style="font-size:11px;color:var(--dim);font-weight:600;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">Manual Edit</div>
+          <textarea id="manual-edit" style="width:100%;min-height:48px;resize:vertical;background:var(--bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:6px;font-family:inherit;font-size:13px"></textarea>
+          <button class="btn" id="btn-save-edit" onclick="saveUserEdit()" style="margin-top:4px">Save Edit</button>
+          <span id="edit-saved-msg" style="color:var(--green);font-size:11px;margin-left:6px;display:none">&#10003; Saved</span>
+        </div>
+        <div class="detail-actions">
+          <button class="btn btn-primary" id="btn-translate" onclick="translateLine()">Translate with LLM</button>
+          <button class="btn" id="btn-discard" onclick="discardTranslation()" style="display:none">Discard</button>
+          <button class="btn" id="btn-batch-file" onclick="batchTranslate('file')">Batch Xlate File (skip)</button>
+          <button class="btn" id="btn-apply-file" onclick="applyFile()">Write to File</button>
+          <button class="btn" onclick="openInVSCode()">VSCode</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="llm-queue-overlay">
+  <div id="llm-queue-box">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <h3 style="margin:0">LLM Translation Queue</h3>
+      <span id="llm-queue-count" style="font-size:12px;color:var(--dim)"></span>
+      <span style="margin-left:auto">
+        <button class="btn" onclick="closeLLMQueue()" style="font-size:20px;line-height:1;background:none;border:none;color:var(--text);cursor:pointer">&times;</button>
+      </span>
+    </div>
+    <div id="llm-queue-body" style="flex:1;overflow-y:auto;font-size:13px"></div>
+  </div>
+</div>
+
+<div id="batch-overlay">
+  <div id="batch-box">
+    <h3 style="flex-shrink:0">Batch Translation</h3>
+    <p id="batch-scope" style="flex-shrink:0"></p>
+    <p id="batch-current" style="flex-shrink:0;font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></p>
+    <div id="batch-bar" style="flex-shrink:0"><div id="batch-bar-fill"></div></div>
+    <p id="batch-text" style="flex-shrink:0">0 / 0</p>
+    <div id="batch-results">
+      <table><tbody id="batch-results-body"></tbody></table>
+    </div>
+    <div id="batch-errors"></div>
+    <div style="margin-top:12px;display:flex;gap:8px;justify-content:center;flex-shrink:0">
+      <button class="btn" id="btn-batch-cancel" onclick="cancelBatch()" style="background:var(--red);color:#fff">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ---- State ----
+let selectedFile = null;
+let selectedLine = null;
+let selectedDir = null;
+let linesData = [];
+let showLLMOnly = false;
+let showOriginalsOnly = false;
+let showBrokenOnly = false;
+let scanComplete = false;
+
+// ---- Initial check - hide placeholder immediately if cached ----
+(async function() {
+  try {
+    const r = await fetch('/api/status');
+    const s = await r.json();
+    document.getElementById('btn-reasoning').textContent = s.reasoning_mode ? 'Reasoning: ON' : 'Reasoning: OFF';
+    if (s.scan_complete) {
+      scanComplete = true;
+      document.getElementById('scan-placeholder').style.display = 'none';
+      document.getElementById('table-container').style.display = '';
+      loadTree();
+    }
+  } catch(e) { /* server not ready */ }
+})();
+
+// ---- Poll status ----
+async function pollStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const s = await r.json();
+    document.getElementById('stat-files').textContent = `Files: ${s.files}`;
+    document.getElementById('stat-lines').textContent = `Lines: ${s.lines}`;
+    document.getElementById('stat-orig').innerHTML = `&#10003; ${s.counts.ORIGINAL || 0}`;
+    document.getElementById('stat-trns').innerHTML = `&#8596; ${s.counts.TRANSLATED || 0}`;
+    document.getElementById('stat-llm').innerHTML = `&#129302; ${s.counts.LLM_TWEAKED || 0}`;
+    document.getElementById('stat-user').innerHTML = `&#128100; ${s.counts.USER_MODIFIED || 0}`;
+    document.getElementById('stat-broken').innerHTML = `&#10060; ${s.counts.BROKEN || 0}`;
+
+    const llmEl = document.getElementById('llm-status');
+    if (s.llm_connected) {
+      llmEl.className = 'llm-on'; llmEl.textContent = 'LLM: ✓';
+    } else {
+      llmEl.className = 'llm-off'; llmEl.textContent = 'LLM: ✗';
+    }
+
+    const reBtn = document.getElementById('btn-reasoning');
+    reBtn.textContent = s.reasoning_mode ? 'Reasoning: ON' : 'Reasoning: OFF';
+    const ovBtn = document.getElementById('btn-overwrite');
+    ovBtn.textContent = s.overwrite_mode ? 'Overwrite: ON' : 'Overwrite: OFF';
+    const batchLabel = s.overwrite_mode ? 'Overwrite' : 'skip';
+    document.getElementById('btn-batch-file').textContent = `Batch Xlate File (${batchLabel})`;
+    document.getElementById('btn-batch-dir').textContent = `Batch Xlate Dir (${batchLabel})`;
+
+    // Update scan progress bar
+    if (!scanComplete && s.scan_running && s.scan_progress.total > 0) {
+      const pct = Math.min(100, Math.round((s.scan_progress.done / s.scan_progress.total) * 100));
+      document.getElementById('scan-progress-bar').style.width = pct + '%';
+      document.getElementById('scan-progress-text').textContent =
+        `Scanning: ${s.scan_progress.done} / ${s.scan_progress.total} files (${pct}%)`;
+      document.getElementById('scan-progress-hint').textContent = 'Phase: ' + s.scan_progress.phase;
+    }
+    if (!scanComplete && s.scan_complete) {
+      scanComplete = true;
+      document.getElementById('scan-placeholder').style.display = 'none';
+      document.getElementById('table-container').style.display = '';
+      document.getElementById('tree-container').innerHTML = '';
+      loadTree();
+    }
+  } catch(e) { /* server not ready */ }
+}
+setInterval(pollStatus, 1500);
+pollStatus();
+
+// Autosave cache every 30s
+setInterval(async () => {
+  try { await fetch('/api/save-cache', { method: 'POST' }); } catch(e) {}
+}, 30000);
+
+// ---- Reasoning toggle ----
+async function toggleReasoning() {
+  const btn = document.getElementById('btn-reasoning');
+  const newState = btn.textContent.includes('ON') ? false : true;
+  btn.disabled = true;
+  try {
+    await fetch('/api/toggle-reasoning', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ enabled: newState }),
+    });
+    btn.textContent = newState ? 'Reasoning: ON' : 'Reasoning: OFF';
+  } catch(e) { /* ignore */ }
+  btn.disabled = false;
+}
+
+// ---- Overwrite toggle ----
+async function toggleOverwrite() {
+  const btn = document.getElementById('btn-overwrite');
+  const newState = btn.textContent.includes('ON') ? false : true;
+  btn.disabled = true;
+  try {
+    await fetch('/api/toggle-overwrite', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ enabled: newState }),
+    });
+    btn.textContent = newState ? 'Overwrite: ON' : 'Overwrite: OFF';
+  } catch(e) { /* ignore */ }
+  btn.disabled = false;
+  // update batch button labels
+  const label = newState ? 'Overwrite' : 'skip';
+  document.getElementById('btn-batch-file').textContent = `Batch Xlate File (${label})`;
+  document.getElementById('btn-batch-dir').textContent = `Batch Xlate Dir (${label})`;
+}
+
+// ---- Search ----
+let searchFileTimer = null;
+async function searchFiles(q) {
+  clearTimeout(searchFileTimer);
+  const container = document.getElementById('tree-container');
+  const results = document.getElementById('file-search-results');
+  if (!q || q.length < 2) {
+    container.style.display = '';
+    results.style.display = 'none';
+    return;
+  }
+  searchFileTimer = setTimeout(async () => {
+    container.style.display = 'none';
+    results.style.display = '';
+    results.innerHTML = '<div style="color:var(--dim);padding:8px;font-size:12px">Searching...</div>';
+    try {
+      const r = await fetch(`/api/search-files?q=${encodeURIComponent(q)}`);
+      const files = await r.json();
+      if (files.length === 0) {
+        results.innerHTML = '<div style="color:var(--dim);padding:8px;font-size:12px">No files found</div>';
+        return;
+      }
+      results.innerHTML = files.map(f =>
+        `<div class="search-result-item" onclick="selectSearchFile('${f.replace(/'/g, "\\'")}')">
+          <div class="sr-file">${escapeHtml(f)}</div>
+        </div>`
+      ).join('');
+    } catch(e) {
+      results.innerHTML = '<div style="color:var(--red);padding:8px;font-size:12px">Search error</div>';
+    }
+  }, 200);
+}
+
+function selectSearchFile(rel) {
+  selectedFile = rel;
+  selectedDir = null;
+  document.getElementById('file-search-results').style.display = 'none';
+  document.getElementById('tree-container').style.display = '';
+  document.getElementById('file-search').value = '';
+  document.getElementById('btn-batch-dir').style.display = 'none';
+  loadFile(rel);
+}
+
+let searchStrTimer = null;
+async function searchStrings(q) {
+  clearTimeout(searchStrTimer);
+  const container = document.getElementById('table-container');
+  const results = document.getElementById('string-search-results');
+  if (!q || q.length < 2) {
+    container.style.display = '';
+    results.style.display = 'none';
+    return;
+  }
+  searchStrTimer = setTimeout(async () => {
+    container.style.display = 'none';
+    results.style.display = '';
+    results.innerHTML = '<div style="color:var(--dim);padding:8px;font-size:12px">Searching...</div>';
+    try {
+      const r = await fetch(`/api/search-strings?q=${encodeURIComponent(q)}`);
+      const strings = await r.json();
+      if (strings.length === 0) {
+        results.innerHTML = '<div style="color:var(--dim);padding:8px;font-size:12px">No strings found</div>';
+        return;
+      }
+      results.innerHTML = strings.map(s =>
+        `<div class="search-result-item" onclick="selectSearchString('${s.file_rel.replace(/'/g, "\\'")}', ${s.line_number})">
+          <div class="sr-file">${escapeHtml(s.file_rel)}:${s.line_number} ${s.status_emoji}</div>
+          <div class="sr-text">${escapeHtml(s.original_content.substring(0, 120))}</div>
+          <div class="sr-meta">→ ${escapeHtml((s.content || s.original_content).substring(0, 120))}</div>
+        </div>`
+      ).join('');
+    } catch(e) {
+      results.innerHTML = '<div style="color:var(--red);padding:8px;font-size:12px">Search error</div>';
+    }
+  }, 200);
+}
+
+async function selectSearchString(rel, line) {
+  // Load the file and navigate to the line
+  selectedFile = rel;
+  selectedDir = null;
+  document.getElementById('btn-batch-dir').style.display = 'none';
+  // Disable LLM filter so the target line is visible
+  if (showLLMOnly) toggleShowLLM();
+  await loadFile(rel);
+  document.getElementById('string-search-results').style.display = 'none';
+  document.getElementById('table-container').style.display = '';
+  document.getElementById('string-search').value = '';
+  // Find and select the line (search _allLinesData in case filter hides it)
+  for (let i = 0; i < _allLinesData.length; i++) {
+    if (_allLinesData[i].line_number === line) {
+      showDetail(_allLinesData.indexOf(_allLinesData[i]));
+      const rows = document.querySelectorAll('#lines-body tr');
+      rows[_allLinesData.indexOf(_allLinesData[i])]?.classList.add('selected');
+      rows[_allLinesData.indexOf(_allLinesData[i])]?.scrollIntoView({ block: 'center' });
+      break;
+    }
+  }
+}
+
+// ---- Tree ----
+async function loadTree(parent, container) {
+  if (!container) {
+    container = document.getElementById('tree-container');
+    parent = '';
+  }
+  const url = parent ? `/api/tree?parent=${encodeURIComponent(parent)}` : '/api/tree';
+  const r = await fetch(url);
+  const entries = await r.json();
+  for (const entry of entries) {
+    const node = document.createElement('div');
+    node.className = 'tree-node' + (entry.type === 'dir' ? ' dir' : '');
+    node.dataset.rel = entry.rel;
+    node.dataset.type = entry.type;
+
+    const indent = document.createElement('span');
+    indent.style.display = 'inline-block';
+    indent.style.width = '12px';
+
+    const icon = document.createElement('span');
+    icon.className = 'icon';
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = entry.name;
+
+    const summary = document.createElement('span');
+    summary.className = 'summary';
+    summary.textContent = entry.summary;
+
+    if (entry.type === 'dir') {
+      icon.textContent = '\u25b6'; // ▶ collapsed
+      node.appendChild(icon);
+      node.appendChild(name);
+      node.appendChild(summary);
+
+      const childrenContainer = document.createElement('div');
+      childrenContainer.className = 'tree-children';
+      childrenContainer.style.paddingLeft = '18px';
+      node.appendChild(childrenContainer);
+
+      node.addEventListener('click', function(e) {
+        e.stopPropagation();
+        if (childrenContainer.classList.contains('open')) {
+          childrenContainer.classList.remove('open');
+          icon.textContent = '\u25b6';
+          // Deselect if this was selected
+          document.querySelectorAll('.tree-node.selected').forEach(n => n.classList.remove('selected'));
+        } else {
+          // Collapse other trees at this level
+          // Actually, just expand this one
+          if (!childrenContainer.hasChildNodes()) {
+            loadTree(entry.rel, childrenContainer);
+          }
+          childrenContainer.classList.add('open');
+          icon.textContent = '\u25bc';
+        }
+        // Mark as selected
+        document.querySelectorAll('.tree-node.selected').forEach(n => n.classList.remove('selected'));
+        node.classList.add('selected');
+        selectedDir = entry.rel;
+        selectedFile = null;
+        document.getElementById('detail-panel').classList.remove('open');
+        document.getElementById('btn-batch-dir').style.display = '';
+        document.getElementById('content-title').querySelector('.file-path').textContent = entry.rel + '/';
+      });
+    } else {
+      icon.textContent = '\u2502';
+
+      // File status color
+      let statusColor = 'var(--dim)';
+      if (entry.summary) {
+        const firstEmoji = entry.summary.split(' ')[0];
+        // Just use default color
+      }
+
+      node.appendChild(indent);
+      node.appendChild(icon);
+      node.appendChild(name);
+      node.appendChild(summary);
+
+      node.addEventListener('click', function(e) {
+        e.stopPropagation();
+        document.querySelectorAll('.tree-node.selected').forEach(n => n.classList.remove('selected'));
+        node.classList.add('selected');
+        selectedFile = entry.rel;
+        selectedDir = null;
+        document.getElementById('btn-batch-dir').style.display = 'none';
+        loadFile(entry.rel);
+      });
+    }
+
+    container.appendChild(node);
+  }
+}
+
+// ---- File ----
+let _allLinesData = [];
+
+function renderTable() {
+  const tbody = document.getElementById('lines-body');
+  tbody.innerHTML = '';
+  for (const s of linesData) {
+    const tr = document.createElement('tr');
+    tr.className = s.status;
+    tr.dataset.idx = linesData.indexOf(s);
+    tr.innerHTML = `
+      <td>${s.status_emoji} ${s.status_label}</td>
+      <td>${s.line_number}</td>
+      <td title="${escapeHtml(s.original_content)}">${escapeHtml(truncate(s.original_content, 120))}</td>
+      <td title="${escapeHtml(s.content)}">${escapeHtml(truncate(s.content, 120))}</td>
+    `;
+    tr.addEventListener('click', function() {
+      document.querySelectorAll('#lines-body tr.selected').forEach(r => r.classList.remove('selected'));
+      tr.classList.add('selected');
+      showDetail(parseInt(tr.dataset.idx));
+    });
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadFile(rel) {
+  document.getElementById('detail-panel').classList.remove('open');
+  const r = await fetch(`/api/file/${encodeURIComponent(rel)}`);
+  const data = await r.json();
+  _allLinesData = data.strings;
+
+  document.getElementById('file-path').textContent = rel;
+  document.getElementById('content-title').querySelector('.file-path').textContent = rel;
+
+  // Show/hide filter buttons
+  const hasLLM = _allLinesData.some(s => s.llm_translation);
+  const hasBroken = _allLinesData.some(s => s.status === 'BROKEN');
+  const hasOrig = _allLinesData.some(s => s.status === 'ORIGINAL');
+  document.getElementById('btn-show-llm').style.display = hasLLM || showLLMOnly ? '' : 'none';
+  document.getElementById('btn-show-broken').style.display = hasBroken || showBrokenOnly ? '' : 'none';
+  document.getElementById('btn-show-orig').style.display = hasOrig || showOriginalsOnly ? '' : 'none';
+
+  // Apply filters
+  linesData = _allLinesData;
+  if (showLLMOnly) linesData = linesData.filter(s => s.llm_translation);
+  if (showOriginalsOnly) linesData = linesData.filter(s => s.status === 'ORIGINAL');
+  if (showBrokenOnly) linesData = linesData.filter(s => s.status === 'BROKEN');
+  renderTable();
+}
+
+function toggleFilter(filter) {
+  if (filter === 'llm') showLLMOnly = !showLLMOnly;
+  if (filter === 'orig') showOriginalsOnly = !showOriginalsOnly;
+  if (filter === 'broken') showBrokenOnly = !showBrokenOnly;
+  const llmBtn = document.getElementById('btn-show-llm');
+  const origBtn = document.getElementById('btn-show-orig');
+  const brokenBtn = document.getElementById('btn-show-broken');
+  llmBtn.textContent = showLLMOnly ? 'Show all' : 'Show LLM only';
+  origBtn.textContent = showOriginalsOnly ? 'Show all' : 'Show Orig only';
+  brokenBtn.textContent = showBrokenOnly ? 'Show all' : 'Show Broken only';
+  // Deactivate other filters when clicking one
+  // (clicking same filter toggles; clicking different filter swaps)
+  linesData = _allLinesData;
+  if (showLLMOnly) linesData = linesData.filter(s => s.llm_translation);
+  else if (showOriginalsOnly) linesData = linesData.filter(s => s.status === 'ORIGINAL');
+  else if (showBrokenOnly) linesData = linesData.filter(s => s.status === 'BROKEN');
+  renderTable();
+}
+
+// ---- Detail ----
+function showDetail(idx) {
+  const s = linesData[idx];
+  selectedLine = s;
+  const panel = document.getElementById('detail-panel');
+  panel.classList.add('open');
+
+  document.getElementById('detail-ref').textContent = `${selectedFile}:${s.line_number}`;
+  const tag = document.getElementById('detail-status-tag');
+  tag.textContent = `${s.status_emoji} ${s.status_label}`;
+  tag.style.color = 'inherit';
+
+  const body = document.getElementById('detail-body');
+  let html = '';
+
+  if (s.original_content !== s.content) {
+    html += `<div class="label">Original</div><div class="content">${escapeHtml(s.original_content)}</div>`;
+    html += `<div class="label">Current</div><div class="content">${escapeHtml(s.content)}</div>`;
+  } else {
+    html += `<div class="label">Text (unchanged)</div><div class="content">${escapeHtml(s.content)}</div>`;
+  }
+  if (s.llm_translation) {
+    html += `<div class="label">LLM Translation</div><div class="content">${escapeHtml(s.llm_translation)}</div>`;
+  }
+  if (s.user_translation) {
+    html += `<div class="label">User Translation</div><div class="content">${escapeHtml(s.user_translation)}</div>`;
+  }
+  html += `<div class="${s.safe ? 'safe' : 'unsafe'}">${s.safe ? '&#10003; Safe' : '&#10060; Issues: ' + (s.issues || []).join(', ')}</div>`;
+
+  body.innerHTML = html;
+
+  // Populate manual edit textarea
+  const editDiv = document.getElementById('detail-edit');
+  const ta = document.getElementById('manual-edit');
+  ta.value = s.user_translation || s.llm_translation || '';
+  editDiv.style.display = 'block';
+  document.getElementById('edit-saved-msg').style.display = 'none';
+
+  // Enable/disable translate button
+  document.getElementById('btn-translate').disabled = false;
+
+  // Show Discard button only when there's an LLM translation
+  document.getElementById('btn-discard').style.display = s.llm_translation ? '' : 'none';
+}
+
+// ---- Save User Edit ----
+async function saveUserEdit() {
+  if (!selectedLine) return;
+  const userText = document.getElementById('manual-edit').value.trim();
+  if (!userText) return;
+  const btn = document.getElementById('btn-save-edit');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  try {
+    const r = await fetch('/api/save-user-edit', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        file_rel: selectedFile,
+        line_number: selectedLine.line_number,
+        source: selectedLine.original_content,
+        user_text: userText,
+      }),
+    });
+    const d = await r.json();
+    if (d.error) { alert(d.error); return; }
+    document.getElementById('edit-saved-msg').style.display = 'inline';
+    await loadFile(selectedFile);
+    for (let i = 0; i < linesData.length; i++) {
+      if (linesData[i].line_number === selectedLine.line_number) {
+        showDetail(i);
+        document.querySelectorAll('#lines-body tr')[i]?.classList.add('selected');
+        break;
+      }
+    }
+  } catch(e) {
+    alert('Save failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save Edit';
+  }
+}
+
+// ---- Translate ----
+async function translateLine() {
+  if (!selectedLine) return;
+  const btn = document.getElementById('btn-translate');
+  btn.disabled = true;
+  btn.textContent = 'Translating...';
+
+  try {
+    const r = await fetch('/api/translate-line', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        file_rel: selectedFile,
+        line_number: selectedLine.line_number,
+        source: selectedLine.original_content,
+      }),
+    });
+    const data = await r.json();
+    if (data.error) {
+      document.getElementById('detail-body').innerHTML += `<div class="unsafe" style="margin-top:8px">Translation failed: ${data.error}</div>`;
+      return;
+    }
+    // Refresh file data
+    await loadFile(selectedFile);
+    // Find and select the updated line
+    for (let i = 0; i < linesData.length; i++) {
+      if (linesData[i].line_number === selectedLine.line_number) {
+        showDetail(i);
+        document.querySelectorAll('#lines-body tr')[i]?.classList.add('selected');
+        break;
+      }
+    }
+  } catch(e) {
+    document.getElementById('detail-body').innerHTML += `<div class="unsafe" style="margin-top:8px">Translation error: ${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Translate with LLM';
+  }
+}
+
+// ---- Batch Translate ----
+async function batchTranslate(scopeType) {
+  const scopeVal = scopeType === 'file' ? selectedFile : selectedDir;
+  if (!scopeVal) return;
+
+  const overlay = document.getElementById('batch-overlay');
+  overlay.classList.add('open');
+  document.getElementById('batch-scope').textContent = `Translating: ${scopeVal}`;
+  document.getElementById('batch-bar-fill').style.width = '0%';
+  document.getElementById('batch-text').textContent = 'Starting...';
+  document.getElementById('batch-errors').textContent = '';
+  document.getElementById('batch-current').textContent = '';
+  document.getElementById('batch-results-body').innerHTML = '';
+  document.getElementById('btn-batch-cancel').style.display = '';
+
+  try {
+    const r = await fetch('/api/batch-translate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ scope_type: scopeType, scope_value: scopeVal }),
+    });
+    const data = await r.json();
+    if (data.error) { alert(data.error); overlay.classList.remove('open'); return; }
+
+    // Poll progress
+    const pollInterval = setInterval(async () => {
+      const pr = await fetch('/api/batch-progress');
+      const p = await pr.json();
+      document.getElementById('batch-bar-fill').style.width = p.total > 0 ? `${(p.done / p.total) * 100}%` : '0%';
+      document.getElementById('batch-text').textContent = `${p.done} / ${p.total}`;
+      document.getElementById('batch-current').textContent = p.current || '';
+
+      // Render results log
+      const tbody = document.getElementById('batch-results-body');
+      if (p.results) {
+        // Only append new rows we haven't seen
+        const existing = tbody.children.length;
+        for (let i = existing; i < p.results.length; i++) {
+          const r = p.results[i];
+          const tr = document.createElement('tr');
+          const origCell = document.createElement('td');
+          origCell.className = 'batch-result-orig';
+          origCell.textContent = r.original;
+          tr.appendChild(origCell);
+          const xlateCell = document.createElement('td');
+          xlateCell.className = 'batch-result-xlate';
+          xlateCell.textContent = '→ ' + r.translation;
+          tr.appendChild(xlateCell);
+          tbody.appendChild(tr);
+        }
+        // Scroll to bottom
+        document.getElementById('batch-results').scrollTop = document.getElementById('batch-results').scrollHeight;
+      }
+
+      if (p.errors && p.errors.length > 0) {
+        document.getElementById('batch-errors').textContent = 'Errors: ' + p.errors.slice(-5).join('\n');
+      }
+      if (p.cancelled) {
+        document.getElementById('batch-errors').textContent += '\nCancelled by user.';
+        const cb = document.getElementById('btn-batch-cancel');
+        cb.disabled = true;
+        cb.textContent = 'Cancelled';
+      }
+      if (!p.running) {
+        clearInterval(pollInterval);
+        document.getElementById('btn-batch-cancel').style.display = 'none';
+        // Refresh tree and status
+        document.getElementById('tree-container').innerHTML = '';
+        loadTree();
+        pollStatus();
+        if (selectedFile) loadFile(selectedFile);
+
+        setTimeout(() => {
+          overlay.classList.remove('open');
+        }, 1500);
+      }
+    }, 500);
+  } catch(e) {
+    alert('Batch failed: ' + e.message);
+    overlay.classList.remove('open');
+  }
+}
+
+// ---- Cancel batch ----
+async function cancelBatch() {
+  document.getElementById('btn-batch-cancel').disabled = true;
+  document.getElementById('btn-batch-cancel').textContent = 'Cancelling...';
+  await fetch('/api/batch-cancel', { method: 'POST' });
+}
+
+// ---- VSCode ----
+function openInVSCode() {
+  if (!selectedLine || !selectedFile) return;
+  const path = selectedFile;
+  const line = selectedLine.line_number;
+  fetch(`/api/open-vscode?file=${encodeURIComponent(path)}&line=${line}`)
+    .then(r => r.json())
+    .then(d => { if (d.error) alert(d.error); })
+    .catch(() => {});
+}
+
+// ---- Discard Translation ----
+async function discardTranslation() {
+  if (!selectedFile || !selectedLine) return;
+  const btn = document.getElementById('btn-discard');
+  btn.disabled = true;
+  btn.textContent = 'Discarding...';
+  try {
+    const r = await fetch('/api/discard-translation', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        file_rel: selectedFile,
+        line_number: selectedLine.line_number,
+        source: selectedLine.original_content,
+      }),
+    });
+    const d = await r.json();
+    if (d.error) { alert(d.error); return; }
+    // Refresh file data
+    await loadFile(selectedFile);
+    for (let i = 0; i < linesData.length; i++) {
+      if (linesData[i].line_number === selectedLine.line_number) {
+        showDetail(i);
+        document.querySelectorAll('#lines-body tr')[i]?.classList.add('selected');
+        break;
+      }
+    }
+    pollStatus();
+  } catch(e) {
+    alert('Discard error: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Discard';
+  }
+}
+
+// ---- Apply to Files ----
+async function applyFile() {
+  const rel = selectedFile;
+  if (!rel) return;
+  const btn = document.getElementById('btn-apply-file');
+  btn.disabled = true;
+  btn.textContent = 'Writing...';
+  try {
+    const r = await fetch('/api/apply', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ scope_type: 'file', scope_value: rel }),
+    });
+    const d = await r.json();
+    btn.textContent = d.files_modified > 0 ? `Written (${d.lines_modified} lines)` : 'No changes';
+    setTimeout(() => { btn.textContent = 'Write to File'; btn.disabled = false; }, 2000);
+    if (d.files_modified > 0) pollStatus();
+  } catch(e) {
+    btn.textContent = 'Error!';
+    setTimeout(() => { btn.textContent = 'Write to File'; btn.disabled = false; }, 2000);
+  }
+}
+
+async function applyAll() {
+  if (!confirm('Apply ALL cached translations to files on disk? This will modify project files.')) return;
+  const btn = document.getElementById('btn-apply-all');
+  btn.disabled = true;
+  btn.textContent = 'Applying...';
+  try {
+    const r = await fetch('/api/apply', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ scope_type: 'all', scope_value: '' }),
+    });
+    const d = await r.json();
+    btn.textContent = `Done (${d.files_modified} files, ${d.lines_modified} lines)`;
+    setTimeout(() => { btn.textContent = 'Apply All to Files'; btn.disabled = false; }, 3000);
+    if (d.files_modified > 0) {
+      pollStatus();
+      if (selectedFile) loadFile(selectedFile);
+    }
+  } catch(e) {
+    btn.textContent = 'Error!';
+    setTimeout(() => { btn.textContent = 'Apply All to Files'; btn.disabled = false; }, 3000);
+  }
+}
+
+// ---- Save / Clear Cache / Rescan ----
+function saveCache() {
+  fetch('/api/save-cache', { method: 'POST' })
+    .then(r => r.json())
+    .then(d => {
+      const btn = document.getElementById('btn-save');
+      btn.textContent = 'Saved!';
+      setTimeout(() => { btn.textContent = 'Save Cache'; }, 2000);
+    });
+}
+
+async function clearBadCache() {
+  if (!confirm('Clear invalid cached translations and reset affected lines?')) return;
+  const btn = document.getElementById('btn-clear-cache');
+  btn.disabled = true;
+  btn.textContent = 'Clearing...';
+  try {
+    const r = await fetch('/api/clear-llm-cache', { method: 'POST' });
+    const d = await r.json();
+    btn.textContent = `Cleared ${d.cache_cleared} cache, ${d.lines_reset} lines`;
+    // Refresh tree + current file
+    document.getElementById('tree-container').innerHTML = '';
+    loadTree();
+    pollStatus();
+    if (selectedFile) loadFile(selectedFile);
+  } catch(e) {
+    btn.textContent = 'Error!';
+  }
+  setTimeout(() => { btn.disabled = false; btn.textContent = 'Clear Bad Cache'; }, 3000);
+}
+
+function rescan() {
+  if (confirm('Rescan the project? This will take ~20s.')) {
+    document.getElementById('tree-container').innerHTML = '';
+    document.getElementById('lines-body').innerHTML = '';
+    document.getElementById('detail-panel').classList.remove('open');
+    scanComplete = false;
+    document.getElementById('scan-placeholder').style.display = '';
+    document.getElementById('table-container').style.display = 'none';
+    fetch('/api/scan', { method: 'POST' });
+  }
+}
+
+// ---- LLM Queue ----
+async function showLLMQueue() {
+  const overlay = document.getElementById('llm-queue-overlay');
+  overlay.classList.add('open');
+  document.getElementById('llm-queue-body').innerHTML = '<div style="color:var(--dim);padding:8px">Loading...</div>';
+  try {
+    const r = await fetch('/api/llm-queue');
+    const items = await r.json();
+    document.getElementById('llm-queue-count').textContent = `${items.length} lines`;
+    const body = document.getElementById('llm-queue-body');
+    body.innerHTML = '';
+    let currentFile = '';
+    for (const s of items) {
+      if (s.file_rel !== currentFile) {
+        currentFile = s.file_rel;
+        const fh = document.createElement('div');
+        fh.className = 'llm-queue-file';
+        fh.textContent = currentFile;
+        fh.addEventListener('click', () => { closeLLMQueue(); selectSearchString(currentFile, s.line_number); });
+        body.appendChild(fh);
+      }
+      const entry = document.createElement('div');
+      entry.className = 'llm-queue-entry';
+      entry.innerHTML = `
+        <span class="lq-line">${s.line_number}</span>
+        <span class="lq-orig">${escapeHtml(truncate(s.original_content, 80))}</span>
+        <span class="lq-trans">→ ${escapeHtml(truncate(s.llm_translation, 80))}</span>
+        <span class="lq-safe">${s.safe ? '&#10003;' : '&#10060;'}</span>
+      `;
+      entry.addEventListener('click', () => { closeLLMQueue(); selectSearchString(currentFile, s.line_number); });
+      body.appendChild(entry);
+    }
+  } catch(e) {
+    document.getElementById('llm-queue-body').innerHTML = '<div style="color:var(--red);padding:8px">Error loading queue</div>';
+  }
+}
+
+function closeLLMQueue() {
+  document.getElementById('llm-queue-overlay').classList.remove('open');
+}
+
+// ---- Helpers ----
+function escapeHtml(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function truncate(s, max) {
+  if (!s || s.length <= max) return s || '';
+  return s.substring(0, max) + '...';
+}
+</script>
+</body>
+</html>
