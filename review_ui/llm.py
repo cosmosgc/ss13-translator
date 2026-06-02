@@ -34,7 +34,9 @@ def make_llm_config(config: Config) -> LLMConfig:
 TRANSLATION_SYSTEM_PROMPT = """You are a translator for a game codebase. Translate from {source_lang} to {target_lang}.
 
 Rules:
-- Keep ALL [brackets], HTML <tags>, \\escapes, %tokens, and macros like \\him exactly as-is.
+- Keep ALL [brackets], HTML <tags>, \\escapes, %tokens, and non-article macros like \\him exactly as-is.
+- Treat English article macros like \\The, \\the, \\a, and \\an as plain words without the backslash.
+- Escaped quotes are shown as normal quotes for readability; keep the quoted phrase intact.
 - Translate only the English words between those special tokens.
 
 CRITICAL: Output ONLY the translated text. No thinking, no analysis, no explanation, no notes, no step-by-step. Begin your response directly with the translation."""
@@ -43,14 +45,34 @@ STRICT_SYSTEM_PROMPT = """You are a translator for a game codebase. Translate fr
 
 CRITICAL RULES — FAILURE MEANS THE GAME CODE BREAKS:
 - KEEP ALL [brackets] EXACTLY as they appear. DO NOT change, translate, remove, or add brackets.
-- KEEP ALL \\escapes and macros like \\The, \\the, \\him, \\his EXACTLY as they appear.
+- KEEP ALL \\escapes and non-article macros like \\him and \\his EXACTLY as they appear.
+- Article macros like \\The, \\the, \\a, and \\an are English-only. Translate them as normal words with NO backslash.
+- Escaped quotes are shown as normal quotes for readability; keep the quoted phrase intact.
 - KEEP ALL HTML <tags>, %tokens, and format specifiers exactly as-is.
 - Translate ONLY the English words between those special tokens.
 - Your PREVIOUS attempt CHANGED or REMOVED some of these tokens. This attempt MUST fix that.
-- Output ONLY the translated text. No thinking, no explanation, no notes."""
+- Output ONLY the translated text. No thinking, no explanation, no notes.
+
+Failed safety checks from the previous attempt:
+{safety_issues}
+
+Before answering, silently verify that the output contains the exact same protected tokens as the input."""
 
 # Letters used to detect if text is actually translatable
 _LETTER_RE = re.compile(r'[A-Za-zÀ-ÿ]')
+_DM_ARTICLE_MACRO_TEXT = {
+    "\\The": "The",
+    "\\the": "the",
+    "\\A": "A",
+    "\\a": "a",
+    "\\An": "An",
+    "\\an": "an",
+}
+_DM_ARTICLE_MACRO_RE = re.compile(r'\\(?:[Tt]he|[Aa]n|[Aa])(?![A-Za-z])')
+_DM_REQUIRED_MACRO_RE = re.compile(
+    r'\\(?:[Tt]hem(?:selves)?|[Tt]heir|[Hh]im(?:self)?|[Hh]e(?:self)?|[Hh]is|[Ii]tself|[Oo]urselves|[Yy]ourselves)'
+)
+_BACKSLASH_WORD_RE = re.compile(r'\\[A-Za-zÀ-ÿ]+')
 
 
 def _should_translate(text: str) -> bool:
@@ -72,21 +94,75 @@ def _extract_from_message(msg: dict) -> str | None:
     """Extract translation from a chat completion message.
 
     Tries (in order):
-    1. Direct content
-    2. reasoning_content with marker-based extraction
-    3. reasoning_content last-quoted-string fallback
+    1. OpenAI/Qwen tool calls
+    2. Direct content
+    3. reasoning_content with marker-based extraction
+    4. reasoning_content last-quoted-string fallback
     """
-    # 1. Direct content
+    tool_result = _extract_from_tool_calls(msg)
+    if tool_result:
+        return _clean_quotes(tool_result)
+
+    # 2. Direct content
     content = (msg.get("content") or "").strip()
     if content:
         return _clean_quotes(content)
 
-    # 2. reasoning_content
+    # 3. reasoning_content
     reasoning = (msg.get("reasoning_content") or "").strip()
     if not reasoning:
         return None
 
     return _extract_from_reasoning(reasoning)
+
+
+def _extract_from_tool_calls(msg: dict) -> str | None:
+    for tool_call in msg.get("tool_calls") or []:
+        found = _extract_from_tool_call_payload(tool_call)
+        if found:
+            return found
+
+    content = msg.get("content") or ""
+    for match in re.finditer(r"<tool_call>\s*(.*?)\s*</tool_call>", content, re.DOTALL):
+        found = _extract_from_tool_call_payload(match.group(1))
+        if found:
+            return found
+
+    return None
+
+
+def _extract_from_tool_call_payload(payload) -> str | None:
+    if isinstance(payload, str):
+        payload = payload.strip()
+        if not payload:
+            return None
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return _clean_quotes(payload)
+
+    if not isinstance(payload, dict):
+        return None
+
+    function_payload = payload.get("function")
+    if isinstance(function_payload, dict):
+        arguments = function_payload.get("arguments")
+        found = _extract_from_tool_call_payload(arguments)
+        if found:
+            return found
+
+    arguments = payload.get("arguments")
+    if arguments is not None:
+        found = _extract_from_tool_call_payload(arguments)
+        if found:
+            return found
+
+    for key in ("translation", "translated_text", "result", "output", "text"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return None
 
 
 _REASONING_MARKERS = [
@@ -171,6 +247,38 @@ def _clean_quotes(text: str) -> str:
     return text.strip()
 
 
+def _format_safety_issues(issues: list[str] | None) -> str:
+    if not issues:
+        return "- Previous translation failed protected-token validation."
+    return "\n".join(f"- {issue}" for issue in issues)
+
+
+def _strip_article_macro_slashes(text: str) -> str:
+    return _DM_ARTICLE_MACRO_RE.sub(lambda m: _DM_ARTICLE_MACRO_TEXT[m.group(0)], text)
+
+
+def _strip_unprotected_backslash_words(text: str) -> str:
+    def replace(match: re.Match) -> str:
+        token = match.group(0)
+        if token in {"\\n", "\\r", "\\t"} or _DM_REQUIRED_MACRO_RE.fullmatch(token):
+            return token
+        return token[1:]
+
+    return _BACKSLASH_WORD_RE.sub(replace, text)
+
+
+def _show_escaped_quotes_to_llm(text: str) -> str:
+    return text.replace('\\"', '"').replace("\\'", "'")
+
+
+def _escape_literal_quotes_like_original(original: str, translation: str) -> str:
+    if '\\"' in original:
+        translation = re.sub(r'(?<!\\)"', r'\\"', translation)
+    if "\\'" in original:
+        translation = re.sub(r"(?<!\\)'", r"\\'", translation)
+    return translation
+
+
 async def translate_with_llm(
     text: str,
     llm_cfg: LLMConfig,
@@ -178,6 +286,7 @@ async def translate_with_llm(
     target_lang: str = "pt-BR",
     reasoning_enabled: bool = True,
     strict: bool = False,
+    safety_issues: list[str] | None = None,
 ) -> str | None:
     """Translate a single text string using the LLM API. Returns None on failure.
 
@@ -189,17 +298,19 @@ async def translate_with_llm(
     """
     if not _should_translate(text):
         return None
-    # Pre-process: protect DM escape sequences from LLM munging
-    # Use bracket-style placeholders since the model is instructed to keep [brackets]
-    ESC_DQUOTE = "[#DQ]"
-    ESC_SQUOTE = "[#SQ]"
-    safe_text = text.replace("\\\"", ESC_DQUOTE).replace("\\'", ESC_SQUOTE)
+    safe_text = _strip_article_macro_slashes(text)
+    safe_text = _show_escaped_quotes_to_llm(safe_text)
 
     if strict:
-        prompt = STRICT_SYSTEM_PROMPT.format(source_lang=source_lang, target_lang=target_lang)
+        prompt = STRICT_SYSTEM_PROMPT.format(
+            source_lang=source_lang,
+            target_lang=target_lang,
+            safety_issues=_format_safety_issues(safety_issues),
+        )
     else:
         prompt = TRANSLATION_SYSTEM_PROMPT.format(source_lang=source_lang, target_lang=target_lang)
     max_tokens = max(llm_cfg.max_tokens, 6144) if reasoning_enabled else 1536
+    user_content = safe_text if strict else f"Translate this to {target_lang}: {safe_text}"
 
     try:
         async with httpx.AsyncClient(timeout=llm_cfg.timeout) as client:
@@ -213,7 +324,7 @@ async def translate_with_llm(
                     "model": llm_cfg.model,
                     "messages": [
                         {"role": "system", "content": prompt},
-                        {"role": "user", "content": f"Translate this to {target_lang}: {safe_text}"},
+                        {"role": "user", "content": user_content},
                     ],
                     "temperature": llm_cfg.temperature,
                     "max_tokens": max_tokens,
@@ -224,8 +335,8 @@ async def translate_with_llm(
             msg = data["choices"][0]["message"]
             translation = _extract_from_message(msg)
             if translation:
-                # Restore escape sequence placeholders
-                translation = translation.replace(ESC_DQUOTE, '\\"').replace(ESC_SQUOTE, "\\'")
+                translation = _escape_literal_quotes_like_original(text, translation)
+                translation = _strip_unprotected_backslash_words(translation)
                 # Strip trailing garbage \" that the model sometimes hallucinates
                 if not text.rstrip().endswith('\\"') and translation.rstrip().endswith('\\"'):
                     translation = translation.rstrip()[:-2].rstrip()

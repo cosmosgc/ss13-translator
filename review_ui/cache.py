@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Any
 
 
-# DM text macros that must be preserved (from translate_ss13.py)
-_DM_MACRO_RE = re.compile(r'\\(?:[Tt]hem(?:selves)?|[Tt]heir|[Tt]he|[Hh]im(?:self)?|[Hh]e(?:self)?|[Hh]is|[Aa]n|[Aa]|[Ii]tself|[Oo]urselves|[Yy]ourselves)')
+# DM text macros that must be preserved (from translate_ss13.py).
+# Article macros (\The, \the, \a, \an) are English-only and are intentionally
+# not restored into translated strings.
+_DM_MACRO_RE = re.compile(r'\\(?:[Tt]hem(?:selves)?|[Tt]heir|[Hh]im(?:self)?|[Hh]e(?:self)?|[Hh]is|[Ii]tself|[Oo]urselves|[Yy]ourselves)')
 # Standard escape sequences
 _DM_ESCAPE_RE = re.compile(r'\\[nrt"\'\\]')
 # Printf-style format specifiers
@@ -16,7 +18,7 @@ _DM_PRINTF_RE = re.compile(r'%(?:\d+\$)?[sdif]|%[sdif]')
 # Combined token pattern — DM macros first so \the isn't split as \t
 _DM_TOKEN_RE = re.compile(
     r'\[.*?\]'
-    r'|\\(?:[Tt]hem(?:selves)?|[Tt]heir|[Tt]he|[Hh]im(?:self)?|[Hh]e(?:self)?|[Hh]is|[Aa]n|[Aa]|[Ii]tself|[Oo]urselves|[Yy]ourselves)'
+    r'|\\(?:[Tt]hem(?:selves)?|[Tt]heir|[Hh]im(?:self)?|[Hh]e(?:self)?|[Hh]is|[Ii]tself|[Oo]urselves|[Yy]ourselves)'
     r'|\\[nrt"\'\\]'
     r'|%(?:\d+\$)?[sdif]|%[sdif]'
 )

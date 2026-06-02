@@ -201,6 +201,14 @@ def should_translate_text(text: str, line: str, ext: str) -> bool:
     return True
 
 
+DM_REQUIRED_MACRO_RE = re.compile(
+    r'\\(?:[Tt]hem(?:selves)?|[Tt]heir|[Hh]im(?:self)?|[Hh]e(?:self)?|[Hh]is|[Ii]tself|[Oo]urselves|[Yy]ourselves)'
+)
+DM_ARTICLE_MACRO_RE = re.compile(r'\\(?:[Tt]he|[Aa]n|[Aa])(?![A-Za-z])')
+# Match unknown backslash words, but ignore common single-character escapes like \n, \r, \t, \" and \\\.
+DM_UNKNOWN_BACKSLASH_RE = re.compile(r'\\(?![nrt"\'\\])[A-Za-z]+')
+
+
 def check_variables_safe(original_content: str, translated_content: str) -> tuple[bool, list[str]]:
     issues: list[str] = []
 
@@ -209,16 +217,24 @@ def check_variables_safe(original_content: str, translated_content: str) -> tupl
     if orig_brackets != trans_brackets:
         issues.append(f"Brackets: {orig_brackets} vs {trans_brackets}")
 
-    orig_macros = re.findall(
-        r'\\(?:[Tt]hem(?:selves)?|[Tt]heir|[Tt]he|[Hh]im(?:self)?|[Hh]e(?:self)?|[Hh]is|[Aa]n|[Aa]|[Ii]tself|[Oo]urselves|[Yy]ourselves)',
-        original_content,
-    )
-    trans_macros = re.findall(
-        r'\\(?:[Tt]hem(?:selves)?|[Tt]heir|[Tt]he|[Hh]im(?:self)?|[Hh]e(?:self)?|[Hh]is|[Aa]n|[Aa]|[Ii]tself|[Oo]urselves|[Yy]ourselves)',
-        translated_content,
-    )
+    orig_macros = DM_REQUIRED_MACRO_RE.findall(original_content)
+    trans_macros = DM_REQUIRED_MACRO_RE.findall(translated_content)
     if orig_macros != trans_macros:
         issues.append(f"Macros: {orig_macros} vs {trans_macros}")
+
+    trans_article_macros = DM_ARTICLE_MACRO_RE.findall(translated_content)
+    if trans_article_macros:
+        issues.append(f"English article macros left in translation: {trans_article_macros}")
+
+    allowed_backslash_words = set(DM_REQUIRED_MACRO_RE.findall(translated_content))
+    allowed_backslash_words.update(DM_ARTICLE_MACRO_RE.findall(translated_content))
+    allowed_backslash_words.update({"\\n", "\\r", "\\t"})
+    unknown_backslash_words = [
+        token for token in DM_UNKNOWN_BACKSLASH_RE.findall(translated_content)
+        if token not in allowed_backslash_words
+    ]
+    if unknown_backslash_words:
+        issues.append(f"Unknown backslash tokens: {unknown_backslash_words}")
 
     orig_escapes = re.findall(r'\\[nrt"\'\\]', original_content)
     trans_escapes = re.findall(r'\\[nrt"\'\\]', translated_content)
@@ -270,9 +286,9 @@ TOKEN_PATTERN = re.compile(
     r"|<[^>]+>"                         # HTML tags
     r"|\\[nrt\"\'\\]"                   # escape sequences
     r"|%(?:\d+\$)?[sdif]"               # printf tokens
-    r"|\\(?:[Tt]hem(?:selves)?|[Tt]heir|[Tt]he|"
+    r"|\\(?:[Tt]hem(?:selves)?|[Tt]heir|"
     r"[Hh]im(?:self)?|[Hh]e(?:self)?|[Hh]is|"
-    r"[Aa]n|[Aa]|[Ii]tself|[Oo]urselves|[Yy]ourselves)"  # DM macros
+    r"[Ii]tself|[Oo]urselves|[Yy]ourselves)"  # non-article DM macros
 )
 
 

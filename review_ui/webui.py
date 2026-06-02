@@ -22,6 +22,7 @@ from review_ui.scanner import (
     FileResult,
     LineStatus,
     TranslatableString,
+    _join_dm_continuations,
     check_variables_safe,
     collect_files,
     scan_file,
@@ -90,6 +91,56 @@ def _ts_from_dict(d: dict) -> TranslatableString:
         llm_translation=d.get("llm_translation"),
         user_translation=d.get("user_translation"),
     )
+
+
+def _cached_scan_entries_valid(file_rel: str, ts_list: list[TranslatableString]) -> bool:
+    """Reject stale scan cache rows whose saved string no longer exists on disk."""
+    abs_path = cfg.target_root / file_rel
+    try:
+        text = abs_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+
+    if file_rel.endswith(".dm"):
+        text, line_map = _join_dm_continuations(text)
+        line_lookup = {
+            original_lineno: joined_lineno
+            for joined_lineno, original_lineno in line_map.items()
+        }
+    else:
+        line_lookup = {}
+    lines = text.splitlines()
+
+    for ts in ts_list:
+        line_number = line_lookup.get(ts.line_number, ts.line_number)
+        line_idx = line_number - 1
+        if line_idx < 0 or line_idx >= len(lines):
+            return False
+        line_text = lines[line_idx]
+        if ts.start < 0 or ts.end > len(line_text):
+            return False
+        expected_quoted = ts.quote + ts.content + ts.quote
+        if line_text[ts.start:ts.end] != expected_quoted:
+            return False
+    return True
+
+
+def _cached_scan_entries_suspicious(ts_list: list[TranslatableString]) -> bool:
+    return any(not ts.original_content.strip() for ts in ts_list)
+
+
+def _refresh_file_scan(file_rel: str) -> list[TranslatableString]:
+    result = scan_file(
+        cfg.target_root / file_rel, cfg.original_root, cfg,
+        cache.llm_cache, cache.user_cache,
+    )
+    cache.set_scan(file_rel, [_ts_to_dict(ts) for ts in result.strings])
+
+    with _lock:
+        fi = FileItem(cfg.target_root / file_rel, result)
+        file_items[file_rel] = fi
+
+    return result.strings
 
 
 # --- Background scan ---
@@ -167,11 +218,21 @@ def _try_load_from_cache() -> bool:
     local_lines: list[TranslatableString] = []
     local_counts: dict[str, int] = {}
     local_tree: dict = {}
+    refreshed_any = False
 
     for file_rel, strings_data in scan_data.items():
         if not strings_data:
             continue
         ts_list = [_ts_from_dict(s) for s in strings_data]
+        if _cached_scan_entries_suspicious(ts_list) and not _cached_scan_entries_valid(file_rel, ts_list):
+            try:
+                ts_list = _refresh_file_scan(file_rel)
+                refreshed_any = True
+            except Exception:
+                continue
+            if not ts_list:
+                continue
+
         for ts in ts_list:
             local_lines.append(ts)
             local_counts[ts.status.name] = local_counts.get(ts.status.name, 0) + 1
@@ -198,6 +259,8 @@ def _try_load_from_cache() -> bool:
         path_tree = local_tree
 
     scan_complete = True
+    if refreshed_any:
+        cache.save()
     return True
 
 
@@ -219,8 +282,59 @@ def _filter_translatable(strings: list[TranslatableString]) -> list[Translatable
         return [ts for ts in strings if ts.original_content.strip()]
     return [
         ts for ts in strings
-        if ts.status in (LineStatus.ORIGINAL, LineStatus.TRANSLATED)
+        if ts.original_content.strip() and ts.status in (LineStatus.ORIGINAL, LineStatus.TRANSLATED)
     ]
+
+
+def _iter_scope_strings(scope_type: str, scope_value: str) -> list[TranslatableString]:
+    with _lock:
+        if scope_type == "file":
+            fi = file_items.get(scope_value)
+            return list(fi.translatable) if fi else []
+        if scope_type == "dir":
+            prefix = scope_value.replace("\\", "/") + "/"
+            return [
+                ts
+                for rel, fi in file_items.items()
+                if rel.replace("\\", "/").startswith(prefix)
+                for ts in fi.translatable
+            ]
+        if scope_type == "all":
+            return [ts for fi in file_items.values() for ts in fi.translatable]
+    return []
+
+
+def _repair_issue_for(ts: TranslatableString) -> tuple[bool, list[str]]:
+    issues: list[str] = []
+    has_issue = ts.status == LineStatus.BROKEN
+    if not ts.original_content.strip():
+        has_issue = True
+        issues.append("No matched English source")
+    elif ts.content:
+        safe, current_issues = check_variables_safe(ts.original_content, ts.content)
+        if not safe:
+            has_issue = True
+            issues.extend(current_issues)
+
+    candidate = ts.user_translation or ts.llm_translation
+    if ts.original_content.strip() and candidate:
+        safe, candidate_issues = check_variables_safe(ts.original_content, candidate)
+        if not safe:
+            has_issue = True
+            issues.extend(f"Candidate {issue}" for issue in candidate_issues)
+
+    if ts.status == LineStatus.BROKEN and not issues:
+        issues.append("Marked broken")
+    return has_issue, issues
+
+
+def _repair_candidates(scope_type: str = "all", scope_value: str = "") -> list[TranslatableString]:
+    result = []
+    for ts in _iter_scope_strings(scope_type, scope_value):
+        has_issue, _ = _repair_issue_for(ts)
+        if has_issue:
+            result.append(ts)
+    return result
 
 
 def _collect_dir_strings(dir_rel: str) -> list[TranslatableString]:
@@ -383,6 +497,32 @@ def api_llm_queue():
     return jsonify(sorted(results, key=lambda r: (r["file_rel"], r["line_number"])))
 
 
+@app.route("/api/repair-queue")
+def api_repair_queue():
+    """Return all lines that are broken, unsafe, or missing source mapping."""
+    scope_type = request.args.get("scope_type", "all")
+    scope_value = request.args.get("scope_value", "")
+    results = []
+    for ts in _repair_candidates(scope_type, scope_value):
+        _, issues = _repair_issue_for(ts)
+        fixable = bool(ts.original_content.strip())
+        results.append({
+            "file_rel": ts.file_rel,
+            "line_number": ts.line_number,
+            "status": ts.status.name,
+            "status_emoji": STATUS_EMOJI.get(ts.status, "?"),
+            "status_label": STATUS_LABEL.get(ts.status, "?"),
+            "original_content": ts.original_content,
+            "content": ts.content,
+            "llm_translation": ts.llm_translation,
+            "user_translation": ts.user_translation,
+            "safe": not issues,
+            "issues": issues,
+            "fixable": fixable,
+        })
+    return jsonify(sorted(results, key=lambda r: (r["file_rel"], r["line_number"])))
+
+
 @app.route("/api/file/<path:rel>")
 def api_file(rel: str):
     with _lock:
@@ -390,6 +530,15 @@ def api_file(rel: str):
 
     if not fi:
         return jsonify({"error": "File not found"}), 404
+    if not _cached_scan_entries_valid(rel, fi.translatable):
+        try:
+            _refresh_file_scan(rel)
+        except Exception:
+            pass
+        with _lock:
+            fi = file_items.get(rel)
+        if not fi:
+            return jsonify({"error": "File not found"}), 404
 
     strings_data = []
     for ts in fi.translatable:
@@ -423,7 +572,16 @@ async def api_translate_line():
     source = data.get("source", "")
 
     if not source:
-        return jsonify({"error": "No source text"}), 400
+        try:
+            refreshed = _refresh_file_scan(file_rel)
+        except Exception:
+            refreshed = []
+        for ts in refreshed:
+            if ts.line_number == line_number and ts.original_content.strip():
+                source = ts.original_content
+                break
+        if not source:
+            return jsonify({"error": "No source text"}), 400
     if not llm_connected:
         # Try reconnecting
         llm_connected = await check_llm_connection(llm_cfg)
@@ -443,7 +601,7 @@ async def api_translate_line():
         # Retry with stricter prompt on first failure
         translation2 = await translate_with_llm(
             source, llm_cfg, cfg.source_lang, cfg.target_lang, reasoning_mode,
-            strict=True,
+            strict=True, safety_issues=issues,
         )
         if translation2:
             safe2, issues2 = check_variables_safe(source, translation2)
@@ -552,14 +710,14 @@ def api_batch_translate():
 
     scope_type = data.get("scope_type", "")
     scope_value = data.get("scope_value", "")
+    repair_only = bool(data.get("repair_only", False))
 
-    todo: list[TranslatableString] = []
-
-    if scope_type == "file":
+    if repair_only:
+        todo = [ts for ts in _repair_candidates(scope_type, scope_value) if ts.original_content.strip()]
+    elif scope_type == "file":
         with _lock:
             fi = file_items.get(scope_value)
-        if fi:
-            todo = _filter_translatable(fi.translatable)
+        todo = _filter_translatable(fi.translatable) if fi else []
     elif scope_type == "dir":
         todo = _collect_dir_strings(scope_value)
     else:
@@ -575,12 +733,13 @@ def api_batch_translate():
         "errors": [],
         "results": [],
         "current": "",
-        "scope": scope_value,
+        "scope": scope_value or scope_type,
         "cancelled": False,
+        "repair_only": repair_only,
     }
     batch_cancel_event.clear()
 
-    thread = threading.Thread(target=_run_batch, args=(todo.copy(),), daemon=True)
+    thread = threading.Thread(target=_run_batch, args=(todo.copy(), repair_only), daemon=True)
     thread.start()
 
     return jsonify({
@@ -590,12 +749,12 @@ def api_batch_translate():
     })
 
 
-def _run_batch(todo: list[TranslatableString]):
+def _run_batch(todo: list[TranslatableString], force_translate: bool = False):
     """Run batch translation in a thread with its own event loop."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(_batch_worker(todo))
+        loop.run_until_complete(_batch_worker(todo, force_translate=force_translate))
     finally:
         loop.close()
 
@@ -621,7 +780,7 @@ def _cached_translation_is_valid(source: str, translation: str) -> bool:
     return True
 
 
-async def _batch_worker(todo: list[TranslatableString]):
+async def _batch_worker(todo: list[TranslatableString], force_translate: bool = False):
     global batch_job, llm_connected
 
     count = 0
@@ -633,10 +792,14 @@ async def _batch_worker(todo: list[TranslatableString]):
             break
 
         source = ts.original_content
+        if not source.strip():
+            batch_job["errors"].append(f"No source: {ts.file_rel}:{ts.line_number}")
+            batch_job["done"] += 1
+            continue
         batch_job["current"] = source
         cache_key = f"{ts.file_rel}:{ts.line_number}:{source}"
         cached = cache.get_llm_translation(cache_key)
-        if cached and _cached_translation_is_valid(source, cached):
+        if not force_translate and cached and _cached_translation_is_valid(source, cached):
             translation = cached
         else:
             translation = await translate_with_llm(
@@ -646,12 +809,12 @@ async def _batch_worker(todo: list[TranslatableString]):
                 batch_job["errors"].append(f"Failed: {ts.file_rel}:{ts.line_number}")
                 batch_job["done"] += 1
                 continue
-            safe, _ = check_variables_safe(source, translation)
+            safe, issues = check_variables_safe(source, translation)
             if not safe:
                 # Retry with stricter prompt
                 translation2 = await translate_with_llm(
                     source, llm_cfg, cfg.source_lang, cfg.target_lang, reasoning_mode,
-                    strict=True,
+                    strict=True, safety_issues=issues,
                 )
                 if translation2:
                     safe2, _ = check_variables_safe(source, translation2)
@@ -742,6 +905,7 @@ def api_apply():
 
     files_modified = 0
     lines_modified = 0
+    skipped_files: list[dict[str, object]] = []
 
     for rel in sorted(target_files):
         fi = file_items.get(rel)
@@ -754,6 +918,25 @@ def api_apply():
             if ts.llm_translation or ts.user_translation
         ]
         if not todo:
+            continue
+
+        invalid_entries = []
+        for ts in todo:
+            translation = ts.user_translation or ts.llm_translation
+            if not translation:
+                continue
+            safe, issues = check_variables_safe(ts.original_content, translation)
+            if ts.status == LineStatus.BROKEN or not safe:
+                ts.status = LineStatus.BROKEN
+                invalid_entries.append({
+                    "line": ts.line_number,
+                    "source": ts.original_content,
+                    "translation": translation,
+                    "issues": issues or ["Already marked broken"],
+                })
+
+        if invalid_entries:
+            skipped_files.append({"file": rel, "errors": invalid_entries})
             continue
 
         abs_path = cfg.target_root / rel
@@ -815,7 +998,7 @@ def api_apply():
             if actual_quoted != expected_quoted:
                 continue
 
-            translation = ts.llm_translation or ts.user_translation
+            translation = ts.user_translation or ts.llm_translation
             if not translation:
                 continue
 
@@ -846,15 +1029,12 @@ def api_apply():
             abs_path.write_text("".join(lines), encoding="utf-8")
             files_modified += 1
 
-        if changed:
-            abs_path.write_text("".join(lines), encoding="utf-8")
-            files_modified += 1
-
     cache.save()
 
     return jsonify({
         "files_modified": files_modified,
         "lines_modified": lines_modified,
+        "skipped_files": skipped_files,
     })
 
 

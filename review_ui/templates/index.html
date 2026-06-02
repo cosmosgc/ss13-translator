@@ -171,6 +171,7 @@ td:nth-child(2) { color: var(--dim); text-align: right; }
       <button class="btn" id="btn-reasoning" onclick="toggleReasoning()">Reasoning: ON</button>
       <button class="btn" id="btn-overwrite" onclick="toggleOverwrite()" style="margin-left:4px">Overwrite: OFF</button>
       <button class="btn" id="btn-llm-queue" onclick="showLLMQueue()" style="margin-left:4px">LLM Queue</button>
+      <button class="btn" id="btn-repair-queue" onclick="showRepairQueue()" style="margin-left:4px">Repair Queue</button>
     </span>
   </div>
 
@@ -190,6 +191,7 @@ td:nth-child(2) { color: var(--dim); text-align: right; }
         <button class="btn" id="btn-show-llm" onclick="toggleFilter('llm')" style="font-size:11px;display:none">Show LLM only</button>
         <button class="btn" id="btn-show-orig" onclick="toggleFilter('orig')" style="font-size:11px;display:none">Show Orig only</button>
         <button class="btn" id="btn-show-broken" onclick="toggleFilter('broken')" style="font-size:11px;display:none">Show Broken only</button>
+        <button class="btn btn-primary" id="btn-repair-visible" onclick="batchRepairQueue()" style="font-size:11px;display:none">Batch Fix Queue</button>
         <span class="file-path" id="file-path"></span>
       </h2>
       <div id="string-search-results" style="display:none;flex:1;overflow-y:auto;padding:4px 0;font-size:13px"></div>
@@ -269,6 +271,7 @@ let showLLMOnly = false;
 let showOriginalsOnly = false;
 let showBrokenOnly = false;
 let scanComplete = false;
+let currentView = 'file';
 
 // ---- Initial check - hide placeholder immediately if cached ----
 (async function() {
@@ -408,6 +411,7 @@ async function searchFiles(q) {
 }
 
 function selectSearchFile(rel) {
+  currentView = 'file';
   selectedFile = rel;
   selectedDir = null;
   document.getElementById('file-search-results').style.display = 'none';
@@ -452,6 +456,7 @@ async function searchStrings(q) {
 }
 
 async function selectSearchString(rel, line) {
+  currentView = 'file';
   // Load the file and navigate to the line
   selectedFile = rel;
   selectedDir = null;
@@ -536,6 +541,7 @@ async function loadTree(parent, container) {
         node.classList.add('selected');
         selectedDir = entry.rel;
         selectedFile = null;
+        currentView = 'dir';
         document.getElementById('detail-panel').classList.remove('open');
         document.getElementById('btn-batch-dir').style.display = '';
         document.getElementById('content-title').querySelector('.file-path').textContent = entry.rel + '/';
@@ -561,6 +567,7 @@ async function loadTree(parent, container) {
         node.classList.add('selected');
         selectedFile = entry.rel;
         selectedDir = null;
+        currentView = 'file';
         document.getElementById('btn-batch-dir').style.display = 'none';
         loadFile(entry.rel);
       });
@@ -580,8 +587,11 @@ function renderTable() {
     const tr = document.createElement('tr');
     tr.className = s.status;
     tr.dataset.idx = linesData.indexOf(s);
+    const statusText = currentView === 'repair' && s.file_rel
+      ? `${s.status_emoji} ${s.status_label}<br><span style="color:var(--dim);font-size:10px">${escapeHtml(truncate(s.file_rel, 42))}</span>`
+      : `${s.status_emoji} ${s.status_label}`;
     tr.innerHTML = `
-      <td>${s.status_emoji} ${s.status_label}</td>
+      <td>${statusText}</td>
       <td>${s.line_number}</td>
       <td title="${escapeHtml(s.original_content)}">${escapeHtml(truncate(s.original_content, 120))}</td>
       <td title="${escapeHtml(s.content)}">${escapeHtml(truncate(s.content, 120))}</td>
@@ -595,7 +605,30 @@ function renderTable() {
   }
 }
 
+async function refreshAfterLineChange(fileRel, lineNumber) {
+  if (currentView === 'repair') {
+    await showRepairQueue();
+    for (let i = 0; i < linesData.length; i++) {
+      if (linesData[i].file_rel === fileRel && linesData[i].line_number === lineNumber) {
+        showDetail(i);
+        document.querySelectorAll('#lines-body tr')[i]?.classList.add('selected');
+        return;
+      }
+    }
+    return;
+  }
+  await loadFile(fileRel);
+  for (let i = 0; i < linesData.length; i++) {
+    if (linesData[i].line_number === lineNumber) {
+      showDetail(i);
+      document.querySelectorAll('#lines-body tr')[i]?.classList.add('selected');
+      break;
+    }
+  }
+}
+
 async function loadFile(rel) {
+  currentView = 'file';
   document.getElementById('detail-panel').classList.remove('open');
   const r = await fetch(`/api/file/${encodeURIComponent(rel)}`);
   const data = await r.json();
@@ -611,6 +644,7 @@ async function loadFile(rel) {
   document.getElementById('btn-show-llm').style.display = hasLLM || showLLMOnly ? '' : 'none';
   document.getElementById('btn-show-broken').style.display = hasBroken || showBrokenOnly ? '' : 'none';
   document.getElementById('btn-show-orig').style.display = hasOrig || showOriginalsOnly ? '' : 'none';
+  document.getElementById('btn-repair-visible').style.display = 'none';
 
   // Apply filters
   linesData = _allLinesData;
@@ -618,6 +652,39 @@ async function loadFile(rel) {
   if (showOriginalsOnly) linesData = linesData.filter(s => s.status === 'ORIGINAL');
   if (showBrokenOnly) linesData = linesData.filter(s => s.status === 'BROKEN');
   renderTable();
+}
+
+async function showRepairQueue() {
+  currentView = 'repair';
+  selectedFile = null;
+  selectedDir = null;
+  selectedLine = null;
+  document.getElementById('detail-panel').classList.remove('open');
+  document.getElementById('btn-batch-dir').style.display = 'none';
+  document.getElementById('btn-show-llm').style.display = 'none';
+  document.getElementById('btn-show-broken').style.display = 'none';
+  document.getElementById('btn-show-orig').style.display = 'none';
+  document.getElementById('btn-repair-visible').style.display = '';
+  document.getElementById('file-path').textContent = 'Repair Queue';
+  document.getElementById('content-title').querySelector('.file-path').textContent = 'Repair Queue';
+  document.getElementById('string-search-results').style.display = 'none';
+  document.getElementById('table-container').style.display = '';
+  document.getElementById('lines-body').innerHTML = '<tr><td colspan="4" style="color:var(--dim);text-align:left">Loading repair queue...</td></tr>';
+
+  try {
+    const r = await fetch('/api/repair-queue');
+    const items = await r.json();
+    _allLinesData = items;
+    linesData = items;
+    document.getElementById('btn-repair-visible').textContent = `Batch Fix Queue (${items.filter(s => s.fixable).length})`;
+    if (!items.length) {
+      document.getElementById('lines-body').innerHTML = '<tr><td colspan="4" style="color:var(--green);text-align:left">No broken or unsafe strings found.</td></tr>';
+      return;
+    }
+    renderTable();
+  } catch(e) {
+    document.getElementById('lines-body').innerHTML = '<tr><td colspan="4" style="color:var(--red);text-align:left">Repair queue failed to load.</td></tr>';
+  }
 }
 
 function toggleFilter(filter) {
@@ -643,10 +710,12 @@ function toggleFilter(filter) {
 function showDetail(idx) {
   const s = linesData[idx];
   selectedLine = s;
+  if (s.file_rel) selectedFile = s.file_rel;
   const panel = document.getElementById('detail-panel');
   panel.classList.add('open');
 
-  document.getElementById('detail-ref').textContent = `${selectedFile}:${s.line_number}`;
+  const fileRel = s.file_rel || selectedFile;
+  document.getElementById('detail-ref').textContent = `${fileRel}:${s.line_number}`;
   const tag = document.getElementById('detail-status-tag');
   tag.textContent = `${s.status_emoji} ${s.status_label}`;
   tag.style.color = 'inherit';
@@ -666,6 +735,9 @@ function showDetail(idx) {
   if (s.user_translation) {
     html += `<div class="label">User Translation</div><div class="content">${escapeHtml(s.user_translation)}</div>`;
   }
+  if (s.issues && s.issues.length) {
+    html += `<div class="label">Issues</div><div class="content unsafe">${escapeHtml(s.issues.join('\\n'))}</div>`;
+  }
   html += `<div class="${s.safe ? 'safe' : 'unsafe'}">${s.safe ? '&#10003; Safe' : '&#10060; Issues: ' + (s.issues || []).join(', ')}</div>`;
 
   body.innerHTML = html;
@@ -679,6 +751,7 @@ function showDetail(idx) {
 
   // Enable/disable translate button
   document.getElementById('btn-translate').disabled = false;
+  document.getElementById('btn-translate').style.display = s.fixable === false ? 'none' : '';
 
   // Show Discard button only when there's an LLM translation
   document.getElementById('btn-discard').style.display = s.llm_translation ? '' : 'none';
@@ -687,6 +760,8 @@ function showDetail(idx) {
 // ---- Save User Edit ----
 async function saveUserEdit() {
   if (!selectedLine) return;
+  const lineFile = selectedLine.file_rel || selectedFile;
+  const lineNumber = selectedLine.line_number;
   const userText = document.getElementById('manual-edit').value.trim();
   if (!userText) return;
   const btn = document.getElementById('btn-save-edit');
@@ -698,7 +773,7 @@ async function saveUserEdit() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         file_rel: selectedFile,
-        line_number: selectedLine.line_number,
+        line_number: lineNumber,
         source: selectedLine.original_content,
         user_text: userText,
       }),
@@ -706,14 +781,7 @@ async function saveUserEdit() {
     const d = await r.json();
     if (d.error) { alert(d.error); return; }
     document.getElementById('edit-saved-msg').style.display = 'inline';
-    await loadFile(selectedFile);
-    for (let i = 0; i < linesData.length; i++) {
-      if (linesData[i].line_number === selectedLine.line_number) {
-        showDetail(i);
-        document.querySelectorAll('#lines-body tr')[i]?.classList.add('selected');
-        break;
-      }
-    }
+    await refreshAfterLineChange(lineFile, lineNumber);
   } catch(e) {
     alert('Save failed: ' + e.message);
   } finally {
@@ -725,6 +793,8 @@ async function saveUserEdit() {
 // ---- Translate ----
 async function translateLine() {
   if (!selectedLine) return;
+  const lineFile = selectedLine.file_rel || selectedFile;
+  const lineNumber = selectedLine.line_number;
   const btn = document.getElementById('btn-translate');
   btn.disabled = true;
   btn.textContent = 'Translating...';
@@ -735,7 +805,7 @@ async function translateLine() {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         file_rel: selectedFile,
-        line_number: selectedLine.line_number,
+        line_number: lineNumber,
         source: selectedLine.original_content,
       }),
     });
@@ -744,21 +814,43 @@ async function translateLine() {
       document.getElementById('detail-body').innerHTML += `<div class="unsafe" style="margin-top:8px">Translation failed: ${data.error}</div>`;
       return;
     }
-    // Refresh file data
-    await loadFile(selectedFile);
-    // Find and select the updated line
-    for (let i = 0; i < linesData.length; i++) {
-      if (linesData[i].line_number === selectedLine.line_number) {
-        showDetail(i);
-        document.querySelectorAll('#lines-body tr')[i]?.classList.add('selected');
-        break;
-      }
-    }
+    await refreshAfterLineChange(lineFile, lineNumber);
   } catch(e) {
     document.getElementById('detail-body').innerHTML += `<div class="unsafe" style="margin-top:8px">Translation error: ${e.message}</div>`;
   } finally {
     btn.disabled = false;
     btn.textContent = 'Translate with LLM';
+  }
+}
+
+async function batchRepairQueue() {
+  const overlay = document.getElementById('batch-overlay');
+  overlay.classList.add('open');
+  document.getElementById('batch-scope').textContent = 'Repairing broken/unsafe strings';
+  document.getElementById('batch-bar-fill').style.width = '0%';
+  document.getElementById('batch-text').textContent = 'Starting...';
+  document.getElementById('batch-errors').textContent = '';
+  document.getElementById('batch-current').textContent = '';
+  document.getElementById('batch-results-body').innerHTML = '';
+  document.getElementById('btn-batch-cancel').style.display = '';
+  document.getElementById('btn-batch-cancel').disabled = false;
+  document.getElementById('btn-batch-cancel').textContent = 'Cancel';
+
+  try {
+    const r = await fetch('/api/batch-translate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ scope_type: 'all', scope_value: '', repair_only: true }),
+    });
+    const data = await r.json();
+    if (data.error) { alert(data.error); overlay.classList.remove('open'); return; }
+    pollBatchProgress(async () => {
+      await showRepairQueue();
+      pollStatus();
+    });
+  } catch(e) {
+    alert('Repair failed: ' + e.message);
+    overlay.classList.remove('open');
   }
 }
 
@@ -786,63 +878,63 @@ async function batchTranslate(scopeType) {
     const data = await r.json();
     if (data.error) { alert(data.error); overlay.classList.remove('open'); return; }
 
-    // Poll progress
-    const pollInterval = setInterval(async () => {
-      const pr = await fetch('/api/batch-progress');
-      const p = await pr.json();
-      document.getElementById('batch-bar-fill').style.width = p.total > 0 ? `${(p.done / p.total) * 100}%` : '0%';
-      document.getElementById('batch-text').textContent = `${p.done} / ${p.total}`;
-      document.getElementById('batch-current').textContent = p.current || '';
-
-      // Render results log
-      const tbody = document.getElementById('batch-results-body');
-      if (p.results) {
-        // Only append new rows we haven't seen
-        const existing = tbody.children.length;
-        for (let i = existing; i < p.results.length; i++) {
-          const r = p.results[i];
-          const tr = document.createElement('tr');
-          const origCell = document.createElement('td');
-          origCell.className = 'batch-result-orig';
-          origCell.textContent = r.original;
-          tr.appendChild(origCell);
-          const xlateCell = document.createElement('td');
-          xlateCell.className = 'batch-result-xlate';
-          xlateCell.textContent = '→ ' + r.translation;
-          tr.appendChild(xlateCell);
-          tbody.appendChild(tr);
-        }
-        // Scroll to bottom
-        document.getElementById('batch-results').scrollTop = document.getElementById('batch-results').scrollHeight;
-      }
-
-      if (p.errors && p.errors.length > 0) {
-        document.getElementById('batch-errors').textContent = 'Errors: ' + p.errors.slice(-5).join('\n');
-      }
-      if (p.cancelled) {
-        document.getElementById('batch-errors').textContent += '\nCancelled by user.';
-        const cb = document.getElementById('btn-batch-cancel');
-        cb.disabled = true;
-        cb.textContent = 'Cancelled';
-      }
-      if (!p.running) {
-        clearInterval(pollInterval);
-        document.getElementById('btn-batch-cancel').style.display = 'none';
-        // Refresh tree and status
-        document.getElementById('tree-container').innerHTML = '';
-        loadTree();
-        pollStatus();
-        if (selectedFile) loadFile(selectedFile);
-
-        setTimeout(() => {
-          overlay.classList.remove('open');
-        }, 1500);
-      }
-    }, 500);
+    pollBatchProgress(async () => {
+      document.getElementById('tree-container').innerHTML = '';
+      loadTree();
+      pollStatus();
+      if (selectedFile) loadFile(selectedFile);
+    });
   } catch(e) {
     alert('Batch failed: ' + e.message);
     overlay.classList.remove('open');
   }
+}
+
+function pollBatchProgress(onDone) {
+  const pollInterval = setInterval(async () => {
+    const pr = await fetch('/api/batch-progress');
+    const p = await pr.json();
+    document.getElementById('batch-bar-fill').style.width = p.total > 0 ? `${(p.done / p.total) * 100}%` : '0%';
+    document.getElementById('batch-text').textContent = `${p.done} / ${p.total}`;
+    document.getElementById('batch-current').textContent = p.current || '';
+
+    const tbody = document.getElementById('batch-results-body');
+    if (p.results) {
+      const existing = tbody.children.length;
+      for (let i = existing; i < p.results.length; i++) {
+        const r = p.results[i];
+        const tr = document.createElement('tr');
+        const origCell = document.createElement('td');
+        origCell.className = 'batch-result-orig';
+        origCell.textContent = r.original;
+        tr.appendChild(origCell);
+        const xlateCell = document.createElement('td');
+        xlateCell.className = 'batch-result-xlate';
+        xlateCell.textContent = '→ ' + r.translation;
+        tr.appendChild(xlateCell);
+        tbody.appendChild(tr);
+      }
+      document.getElementById('batch-results').scrollTop = document.getElementById('batch-results').scrollHeight;
+    }
+
+    if (p.errors && p.errors.length > 0) {
+      document.getElementById('batch-errors').textContent = 'Errors: ' + p.errors.slice(-5).join('\n');
+    }
+    if (p.cancelled) {
+      document.getElementById('batch-errors').textContent += '\nCancelled by user.';
+      const cb = document.getElementById('btn-batch-cancel');
+      cb.disabled = true;
+      cb.textContent = 'Cancelled';
+    }
+    if (!p.running) {
+      clearInterval(pollInterval);
+      document.getElementById('btn-batch-cancel').style.display = 'none';
+      await onDone();
+      setTimeout(() => {
+        document.getElementById('batch-overlay').classList.remove('open');
+      }, 1500);
+    }
+  }, 500);
 }
 
 // ---- Cancel batch ----
