@@ -143,6 +143,11 @@ td:nth-child(2) { color: var(--dim); text-align: right; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--dim); }
+.btn-group { display:inline-flex; }
+.btn-group .btn { border-radius: 0; margin-left: 0; border-right-width: 0; font-size: 11px; padding: 3px 6px; }
+.btn-group .btn:first-child { border-radius: 4px 0 0 4px; }
+.btn-group .btn:last-child { border-radius: 0 4px 4px 0; border-right-width: 1px; }
+.btn-group .btn + .btn { margin-left: 0; }
 </style>
 </head>
 <body>
@@ -172,6 +177,12 @@ td:nth-child(2) { color: var(--dim); text-align: right; }
       <button class="btn" id="btn-overwrite" onclick="toggleOverwrite()" style="margin-left:4px">Overwrite: OFF</button>
       <button class="btn" id="btn-llm-queue" onclick="showLLMQueue()" style="margin-left:4px">LLM Queue</button>
       <button class="btn" id="btn-repair-queue" onclick="showRepairQueue()" style="margin-left:4px">Repair Queue</button>
+      <div class="btn-group" style="display:inline-flex;margin-left:4px">
+        <button class="btn" onclick="quickRepair('escape_quotes')" title="Fix unescaped \" in translations">Fix Quotes</button>
+        <button class="btn" onclick="quickRepair('backslash_words')" title="Strip stray \\t, \\the etc.">Fix \t\the</button>
+        <button class="btn" onclick="quickRepair('brackets')" title="Restore missing [name] brackets">Fix Brackets</button>
+        <button class="btn" onclick="quickRepair('all')" title="Run all quick repairs">Fix All</button>
+      </div>
     </span>
   </div>
 
@@ -851,6 +862,53 @@ async function batchRepairQueue() {
   } catch(e) {
     alert('Repair failed: ' + e.message);
     overlay.classList.remove('open');
+  }
+}
+
+// ---- Quick Non-LLM Repairs ----
+async function quickRepair(repairType) {
+  const names = {
+    escape_quotes: 'Fix Quotes',
+    backslash_words: 'Fix \\t\\the',
+    brackets: 'Fix Brackets',
+    all: 'Fix All',
+  };
+  if (!confirm(`Run "${names[repairType]}" on ALL strings? This auto-applies to files.`)) return;
+  const overlay = document.getElementById('batch-overlay');
+  overlay.classList.add('open');
+  document.getElementById('batch-scope').textContent = `Quick repair: ${names[repairType]}`;
+  document.getElementById('batch-bar-fill').style.width = '0%';
+  document.getElementById('batch-text').textContent = 'Running...';
+  document.getElementById('batch-errors').textContent = '';
+  document.getElementById('batch-current').textContent = '';
+  document.getElementById('batch-results-body').innerHTML = '';
+  document.getElementById('btn-batch-cancel').style.display = 'none';
+  try {
+    const r = await fetch('/api/quick-repair', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ repair_type: repairType, scope_type: 'all', scope_value: '' }),
+    });
+    const d = await r.json();
+    document.getElementById('batch-bar-fill').style.width = '100%';
+    document.getElementById('batch-text').textContent = `Fixed ${d.fixed} strings`;
+    const tbody = document.getElementById('batch-results-body');
+    if (d.items && d.items.length) {
+      for (const item of d.items.slice(0, 50)) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${escapeHtml(truncate(item.file, 36))}</td><td>${item.line}</td><td title="${escapeHtml(item.original)}">${escapeHtml(truncate(item.original, 60))}</td><td>${escapeHtml(truncate(item.translation, 60))}</td><td style="font-size:10px;color:var(--green)">${item.fix}</td>`;
+        tbody.appendChild(tr);
+      }
+      if (d.items.length > 50) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td colspan="5" style="color:var(--dim);text-align:center">...and ${d.items.length - 50} more</td>`;
+        tbody.appendChild(tr);
+      }
+    }
+    pollStatus();
+    if (selectedFile) loadFile(selectedFile);
+  } catch(e) {
+    document.getElementById('batch-text').textContent = 'Error: ' + e.message;
   }
 }
 

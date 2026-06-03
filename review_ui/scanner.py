@@ -11,6 +11,7 @@ from review_ui.config import Config
 class LineStatus(Enum):
     ORIGINAL = auto()      # Content unchanged from original English
     TRANSLATED = auto()    # Content differs from original
+    AUTO_FIXED = auto()    # Automatically fixed without LLM
     LLM_TWEAKED = auto()   # Differs, recorded in LLM cache
     USER_MODIFIED = auto() # Differs, recorded in user cache
     BROKEN = auto()        # Variables/brackets damaged
@@ -19,6 +20,7 @@ class LineStatus(Enum):
 STATUS_EMOJI = {
     LineStatus.ORIGINAL: "\u2705",
     LineStatus.TRANSLATED: "\u2194\ufe0f",
+    LineStatus.AUTO_FIXED: "\U0001F4A1",
     LineStatus.LLM_TWEAKED: "\U0001F916",
     LineStatus.USER_MODIFIED: "\U0001F464",
     LineStatus.BROKEN: "\u274c",
@@ -27,6 +29,7 @@ STATUS_EMOJI = {
 STATUS_LABEL = {
     LineStatus.ORIGINAL: "Original",
     LineStatus.TRANSLATED: "Translated",
+    LineStatus.AUTO_FIXED: "Auto-fixed",
     LineStatus.LLM_TWEAKED: "LLM",
     LineStatus.USER_MODIFIED: "User",
     LineStatus.BROKEN: "Broken",
@@ -339,6 +342,7 @@ def extract_all_strings(text: str, ext: str) -> list[dict]:
         actual_lineno = line_map.get(lineno, lineno)
         for info in extract_string_info(line, ext):
             info["line_number"] = actual_lineno
+            info["line_text"] = line.rstrip("\n\r")
             info["prefix"] = line[: info["start"]]
             info["match_key"] = content_match_key(info["content"])
             results.append(info)
@@ -442,7 +446,9 @@ def scan_file(
         start = s["start"]
         end = s["end"]
         quote = s["quote"]
-        line_text = target_text.splitlines(keepends=True)[line_no - 1].rstrip("\n\r")
+        line_text = s.get("line_text")
+        if line_text is None:
+            line_text = target_text.splitlines(keepends=True)[line_no - 1].rstrip("\n\r")
 
         orig_content = find_original(prefix, match_key, content)
         content_unchanged = (orig_content == content)

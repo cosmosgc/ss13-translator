@@ -5,6 +5,7 @@ SS13 Translation Review — Flask Web UI
 from __future__ import annotations
 
 import asyncio
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -50,6 +51,8 @@ batch_job = {
     "errors": [],
     "scope": "",
     "cancelled": False,
+    "skipped": [],
+    "skipped_count": 0,
 }
 batch_cancel_event = threading.Event()
 
@@ -306,7 +309,7 @@ def _iter_scope_strings(scope_type: str, scope_value: str) -> list[TranslatableS
 
 def _repair_issue_for(ts: TranslatableString) -> tuple[bool, list[str]]:
     issues: list[str] = []
-    has_issue = ts.status == LineStatus.BROKEN
+    has_issue = False
     if not ts.original_content.strip():
         has_issue = True
         issues.append("No matched English source")
@@ -323,8 +326,6 @@ def _repair_issue_for(ts: TranslatableString) -> tuple[bool, list[str]]:
             has_issue = True
             issues.extend(f"Candidate {issue}" for issue in candidate_issues)
 
-    if ts.status == LineStatus.BROKEN and not issues:
-        issues.append("Marked broken")
     return has_issue, issues
 
 
@@ -497,6 +498,120 @@ def api_llm_queue():
     return jsonify(sorted(results, key=lambda r: (r["file_rel"], r["line_number"])))
 
 
+def _run_quick_repair(repair_type: str, scope_type: str = "all", scope_value: str = "") -> list[dict]:
+    """Run a specific non-LLM repair on all matching strings. Returns list of fix records."""
+    fixed: list[dict] = []
+    for ts in _iter_scope_strings(scope_type, scope_value):
+        if not ts.original_content.strip():
+            continue
+        trans = ts.user_translation or ts.llm_translation
+        if not trans:
+            continue
+
+        fixed_trans = None
+        reason = None
+
+        if repair_type == "escape_quotes":
+            fixed_trans, reason = _quick_fix_escape_quotes(ts.original_content, trans)
+        elif repair_type == "backslash_words":
+            fixed_trans, reason = _quick_fix_backslash_words(ts.original_content, trans)
+        elif repair_type == "brackets":
+            fixed_trans, reason = _quick_fix_brackets(ts.original_content, trans)
+
+        if fixed_trans and reason:
+            safe, _ = check_variables_safe(ts.original_content, fixed_trans)
+            if safe:
+                _auto_apply_string(ts, fixed_trans)
+                cache_key = f"{ts.file_rel}:{ts.line_number}:{ts.original_content}"
+                cache.set_llm_translation(cache_key, fixed_trans)
+                with _lock:
+                    fi = file_items.get(ts.file_rel)
+                    if fi:
+                        for ft in fi.translatable:
+                            if ft.line_number == ts.line_number and ft.original_content == ts.original_content:
+                                ft.llm_translation = fixed_trans
+                                ft.content = fixed_trans
+                                ft.status = LineStatus.AUTO_FIXED
+                                break
+                fixed.append({
+                    "file": ts.file_rel,
+                    "line": ts.line_number,
+                    "original": ts.original_content,
+                    "translation": fixed_trans,
+                    "fix": reason,
+                })
+    cache.save()
+    return fixed
+
+
+def _quick_fix_escape_quotes(orig: str, trans: str) -> tuple[str | None, str | None]:
+    """Fix unescaped \" or \' in translation when original has them escaped."""
+    result = trans
+    reason = None
+    if '\\"' in orig and '"' in result and '\\"' not in result:
+        result = result.replace('"', '\\"')
+        reason = 'escape_double_quotes'
+    if "\\'" in orig and "'" in result and "\\'" not in result:
+        result = result.replace("'", "\\'")
+        reason = 'escape_single_quotes'
+    return (result, reason) if reason else (None, None)
+
+
+def _quick_fix_backslash_words(orig: str, trans: str) -> tuple[str | None, str | None]:
+    """Strip stray backslash tokens (\\t, \\n, \\r) and article macro backslashes (\\the, etc.)
+    that should not be in the translated output."""
+    result = trans
+    reason = None
+    # Strip stray \t, \n, \r that are standalone (not part of a longer \token like \the)
+    orig_escapes = set(re.findall(r'\\([nrt])(?![A-Za-zÀ-ÿ])', orig))
+    for esc_char in ['t', 'n', 'r']:
+        esc = '\\' + esc_char
+        if esc in result and esc_char not in orig_escapes:
+            result = result.replace(esc, esc_char)
+            reason = 'strip_stray_escape'
+    # Strip \ from article macros (\the, \a, \an, etc.) left in translation
+    article = re.compile(r'\\([Tt]he|[Aa]n?)\b')
+    if article.search(result):
+        result = article.sub(r'\1', result)
+        reason = reason or 'strip_article_backslash'
+    return (result, reason) if (result != trans) else (None, None)
+
+
+def _quick_fix_brackets(orig: str, trans: str) -> tuple[str | None, str | None]:
+    """Restore missing [bracket] interpolation markers from original."""
+    orig_brackets = re.findall(r'\[.*?\]', orig)
+    if not orig_brackets:
+        return (None, None)
+    trans_brackets = re.findall(r'\[.*?\]', trans)
+    missing = [b for b in orig_brackets if b not in trans_brackets]
+    if not missing:
+        return (None, None)
+    result = trans + " " + " ".join(missing)
+    return (result, 'restore_brackets')
+
+
+@app.route("/api/quick-repair", methods=["POST"])
+def api_quick_repair():
+    """Run a specific non-LLM auto-repair type on all strings."""
+    data = request.get_json(force=True)
+    repair_type = data.get("repair_type", "")
+    scope_type = data.get("scope_type", "all")
+    scope_value = data.get("scope_value", "")
+
+    valid_types = {"escape_quotes", "backslash_words", "brackets", "all"}
+    if repair_type not in valid_types:
+        return jsonify({"error": f"Invalid repair type. Valid: {valid_types}"}), 400
+
+    if repair_type == "all":
+        all_fixed: list[dict] = []
+        for rt in ("escape_quotes", "backslash_words", "brackets"):
+            all_fixed.extend(_run_quick_repair(rt, scope_type, scope_value))
+        return jsonify({"fixed": len(all_fixed), "items": all_fixed})
+
+    fixed = _run_quick_repair(repair_type, scope_type, scope_value)
+    return jsonify({"fixed": len(fixed), "items": fixed})
+
+
 @app.route("/api/repair-queue")
 def api_repair_queue():
     """Return all lines that are broken, unsafe, or missing source mapping."""
@@ -505,6 +620,7 @@ def api_repair_queue():
     results = []
     for ts in _repair_candidates(scope_type, scope_value):
         _, issues = _repair_issue_for(ts)
+        # Consider a string fixable if it has non-empty source and basic sanity
         fixable = bool(ts.original_content.strip())
         results.append({
             "file_rel": ts.file_rel,
@@ -780,6 +896,86 @@ def _cached_translation_is_valid(source: str, translation: str) -> bool:
     return True
 
 
+def _auto_apply_string(ts: TranslatableString, translation: str) -> bool:
+    """Write a single string's translation to its target file on disk."""
+    rel = ts.file_rel
+    abs_path = cfg.target_root / rel
+    raw = abs_path.read_text(encoding="utf-8")
+    lines = raw.splitlines(keepends=True)
+
+    merge_groups: list[tuple[int, int]] = []
+    if rel.endswith(".dm"):
+        i = 0
+        while i < len(lines):
+            stripped = lines[i].rstrip("\n\r")
+            if stripped.endswith("\\") and i + 1 < len(lines):
+                merge_groups.append((i, 2))
+                i += 2
+            else:
+                merge_groups.append((i, 1))
+                i += 1
+    else:
+        merge_groups = [(i, 1) for i in range(len(lines))]
+
+    joined_lines: list[str] = []
+    for first, count in merge_groups:
+        if count == 1:
+            joined_lines.append(lines[first])
+        else:
+            l1 = lines[first].rstrip("\n\r")
+            l2 = lines[first + 1]
+            joined = l1[:-1] + l2.lstrip()
+            joined_lines.append(joined + "\n")
+
+    line_idx = ts.line_number - 1
+    jl_idx = None
+    for gi, (first, count) in enumerate(merge_groups):
+        if first <= line_idx < first + count:
+            jl_idx = gi
+            break
+    if jl_idx is None or jl_idx >= len(joined_lines):
+        return False
+
+    line_text = joined_lines[jl_idx].rstrip("\n\r")
+    if ts.start < 0 or ts.end > len(line_text):
+        return False
+    expected_quoted = ts.quote + ts.content + ts.quote
+    actual_quoted = line_text[ts.start:ts.end]
+    if actual_quoted != expected_quoted:
+        return False
+
+    new_quoted = ts.quote + translation + ts.quote
+    new_line_text = line_text[:ts.start] + new_quoted + line_text[ts.end:]
+    eol = joined_lines[jl_idx][len(line_text):]
+    joined_lines[jl_idx] = new_line_text + eol
+
+    if rel.endswith(".dm"):
+        unjoined: list[str] = []
+        for gi, (first, count) in enumerate(merge_groups):
+            if count == 1:
+                unjoined.append(joined_lines[gi])
+            else:
+                jl = joined_lines[gi].rstrip("\n\r")
+                eol2 = joined_lines[gi][len(jl):] or "\n"
+                orig_cont = lines[first + 1]
+                indent = orig_cont[: len(orig_cont) - len(orig_cont.lstrip())]
+                unjoined.append(jl + " \\" + eol2)
+                unjoined.append(indent + eol2)
+        lines = unjoined
+
+    abs_path.write_text("".join(lines), encoding="utf-8")
+    with _lock:
+        fi = file_items.get(rel)
+        if fi:
+            for ft in fi.translatable:
+                if ft.line_number == ts.line_number and ft.original_content == ts.original_content:
+                    ft.content = translation
+                    ft.llm_translation = None
+                    ft.status = LineStatus.TRANSLATED
+                    break
+    return True
+
+
 async def _batch_worker(todo: list[TranslatableString], force_translate: bool = False):
     global batch_job, llm_connected
 
@@ -793,10 +989,87 @@ async def _batch_worker(todo: list[TranslatableString], force_translate: bool = 
 
         source = ts.original_content
         if not source.strip():
-            batch_job["errors"].append(f"No source: {ts.file_rel}:{ts.line_number}")
+            # Skip unfixable items (empty source) rather than treating as errors
+            batch_job["skipped"].append(f"No source: {ts.file_rel}:{ts.line_number}")
+            batch_job["skipped_count"] += 1
             batch_job["done"] += 1
             continue
         batch_job["current"] = source
+
+        # Try simple auto-fixes before calling the LLM.
+        def _attempt_simple_fix(orig: str, trans: str) -> tuple[str, str | None]:
+            if not trans:
+                return (trans, None)
+            # 1. Quote escaping: if original uses escaped quotes, match them
+            if '\\"' in orig and '"' in trans and '\\"' not in trans:
+                return (trans.replace('"', '\\"'), 'escape_double_quotes')
+            if "\\'" in orig and "'" in trans and "\\'" not in trans:
+                return (trans.replace("'", "\\'"), 'escape_single_quotes')
+            # 2. Bracket interpolation: restore [name] patterns missing from translation
+            orig_brackets = re.findall(r'\[.*?\]', orig)
+            if orig_brackets:
+                trans_brackets = re.findall(r'\[.*?\]', trans)
+                missing = [b for b in orig_brackets if b not in trans_brackets]
+                if missing:
+                    fixed = trans + " " + " ".join(missing)
+                    return (fixed, 'restore_brackets')
+            # 3. Escape sequences: restore \\n, \\t etc. if missing
+            orig_escapes = re.findall(r'\\[nrt]', orig)
+            if orig_escapes:
+                trans_escapes = re.findall(r'\\[nrt]', trans)
+                missing_esc = [e for e in orig_escapes if e not in trans_escapes]
+                if missing_esc:
+                    return (trans, None)  # can't auto-fix cleanly, skip
+            # 4. HTML tags: restore <b>, <br> etc. if missing
+            orig_tags = re.findall(r'<[^>]+>', orig)
+            if orig_tags:
+                trans_tags = re.findall(r'<[^>]+>', trans)
+                missing_tags = [t for t in orig_tags if t not in trans_tags]
+                if missing_tags:
+                    return (trans, None)  # can't auto-fix cleanly, skip
+            # 5. Printf format: restore %s, %d etc.
+            orig_printf = re.findall(r'%(?:\d+\$)?[sdif]|%[sdif]', orig)
+            if orig_printf:
+                trans_printf = re.findall(r'%(?:\d+\$)?[sdif]|%[sdif]', trans)
+                if orig_printf != trans_printf:
+                    return (trans, None)
+            # 6. Strip leading/trailing whitespace inside quoted content
+            stripped = trans.strip()
+            if stripped != trans and stripped:
+                return (stripped, 'strip_whitespace')
+            return (trans, None)
+
+        fixed_translation, fix_reason = _attempt_simple_fix(source, ts.llm_translation or ts.user_translation or "")
+        if fix_reason:
+            safe_fix, issues_fix = check_variables_safe(source, fixed_translation)
+            if safe_fix:
+                translation = fixed_translation
+                cache_key = f"{ts.file_rel}:{ts.line_number}:{source}"
+                cache.set_llm_translation(cache_key, translation)
+                new_status = LineStatus.AUTO_FIXED
+                # Auto-apply the fix to the file on disk before updating in-memory state
+                _auto_apply_string(ts, translation)
+                with _lock:
+                    fi = file_items.get(ts.file_rel)
+                    if fi:
+                        for ft in fi.translatable:
+                            if ft.line_number == ts.line_number and ft.original_content == source:
+                                ft.llm_translation = translation
+                                ft.content = translation
+                                ft.status = new_status
+                                break
+                batch_job["results"].append({
+                    "file": ts.file_rel,
+                    "line": ts.line_number,
+                    "original": source,
+                    "translation": translation,
+                    "auto_fix": fix_reason,
+                })
+                count += 1
+                batch_job["done"] = count
+                if count % 5 == 0:
+                    await asyncio.sleep(0)
+                continue
         cache_key = f"{ts.file_rel}:{ts.line_number}:{source}"
         cached = cache.get_llm_translation(cache_key)
         if not force_translate and cached and _cached_translation_is_valid(source, cached):
@@ -1028,6 +1301,19 @@ def api_apply():
         if changed:
             abs_path.write_text("".join(lines), encoding="utf-8")
             files_modified += 1
+            # Update in-memory state: content reflects what's now on disk,
+            # clear the pending translation
+            with _lock:
+                for ts in todo:
+                    trans = ts.user_translation or ts.llm_translation
+                    if not trans:
+                        continue
+                    for ft in fi.translatable:
+                        if ft.line_number == ts.line_number and ft.original_content == ts.original_content:
+                            ft.content = trans
+                            ft.llm_translation = None
+                            ft.status = LineStatus.TRANSLATED
+                            break
 
     cache.save()
 

@@ -272,7 +272,9 @@ def _show_escaped_quotes_to_llm(text: str) -> str:
 
 
 def _escape_literal_quotes_like_original(original: str, translation: str) -> str:
-    if '\\"' in original:
+    # Escape unescaped double quotes — the translation will be placed
+    # between " delimiters in DM/JS and any bare " would break the string.
+    if '"' in translation:
         translation = re.sub(r'(?<!\\)"', r'\\"', translation)
     if "\\'" in original:
         translation = re.sub(r"(?<!\\)'", r"\\'", translation)
