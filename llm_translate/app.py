@@ -119,51 +119,11 @@ def _build_join_map(lines: list[str]) -> tuple[list[tuple[int, int]], list[str]]
 
 
 def _unjoin_lines(merge_groups: list[tuple[int, int]], joined_lines: list[str], original_lines: list[str]) -> list[str]:
-    """Un-join DM joined lines back to original structure.
-    Splits translated string content proportionally across continuation lines."""
+    """Collapse all DM continuations into single lines and remove empties."""
     result: list[str] = []
     for gi, (first, count) in enumerate(merge_groups):
-        if count == 1:
-            result.append(joined_lines[gi])
-        else:
-            jl = joined_lines[gi].rstrip("\n\r")
-            eol = joined_lines[gi][len(jl):] or "\n"
-            orig_l1 = original_lines[first].rstrip("\n\r")
-            orig_l2 = original_lines[first + 1]
-            indent = orig_l2[: len(orig_l2) - len(orig_l2.lstrip())]
-
-            # Find original split point inside the string content
-            orig_prefix = orig_l1[:-1]  # without trailing backslash
-            orig_split_abs = len(orig_prefix)
-
-            # Find quoted content boundaries
-            q_start = jl.find('"')
-            q_end = jl.rfind('"')
-            if q_start >= 0 and q_end > q_start + 1 and orig_split_abs > q_start + 1:
-                orig_l2_content = orig_l2.lstrip()
-                orig_joined = orig_prefix + orig_l2_content
-                oq_start = orig_joined.find('"')
-                oq_end = orig_joined.rfind('"')
-                if oq_start >= 0 and oq_end > oq_start + 1:
-                    orig_content_len = oq_end - oq_start - 1
-                    if orig_content_len > 0:
-                        orig_break = orig_split_abs - (oq_start + 1)
-                        trans_content = jl[q_start + 1:q_end]
-                        trans_content_len = len(trans_content)
-                        if 0 < orig_break < orig_content_len and trans_content_len > 0:
-                            new_break = int(orig_break / orig_content_len * trans_content_len)
-                            if 0 < new_break < trans_content_len:
-                                part1 = trans_content[:new_break]
-                                part2 = trans_content[new_break:]
-                                prefix = jl[:q_start]
-                                suffix = jl[q_end + 1:]
-                                result.append(prefix + '"' + part1 + ' \\' + eol)
-                                result.append(indent + part2 + '"' + suffix + eol)
-                                continue
-
-            # Fallback: collapse continuation to single line (removes blank line)
-            result.append(jl + eol)
-    return result
+        result.append(joined_lines[gi])
+    return [l for l in result if l.strip()] or result[:1]
 
 
 def _apply_string(
@@ -238,21 +198,6 @@ def _apply_string(
         return True
 
     return False
-
-    new_line_text = line_text[:ts.start] + new_quoted + line_text[ts.end:]
-    eol = lines_ref[line_ref_idx][len(line_text):]
-    lines_ref[line_ref_idx] = new_line_text + eol
-
-    with _lock:
-        fi = _file_items.get(rel)
-        if fi:
-            for ft in fi.translatable:
-                if (ft.line_number == ts.line_number
-                        and ft.original_content == ts.original_content):
-                    ft.content = translation
-                    ft.status = LineStatus.TRANSLATED
-                    break
-    return True
 
 
 def _flush_file(rel: str, lines: list[str]) -> int:
@@ -803,6 +748,14 @@ def api_scan():
     thread = threading.Thread(target=_run_scan_thread, kwargs={"force": force}, daemon=True)
     thread.start()
     return jsonify({"status": "started", "mode": mode})
+
+
+@app.route("/api/refresh-cache", methods=["POST"])
+def api_refresh_cache():
+    """Reload cached scan results from disk without re-scanning."""
+    cache.load()
+    ok = _load_cached_results()
+    return jsonify({"status": "ok" if ok else "no_cache"})
 
 
 @app.route("/api/files")

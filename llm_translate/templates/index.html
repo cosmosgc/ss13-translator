@@ -87,6 +87,7 @@ button:disabled { opacity: 0.4; cursor: default; }
         <option value="pending">Pending</option>
         <option value="done">Done</option>
       </select>
+      <button onclick="refreshCache()" title="Reload scan cache from disk" style="padding:4px 8px;font-size:11px">&#x1f504;</button>
     </div>
     <div id="file-list"></div>
   </div>
@@ -171,6 +172,19 @@ async function scan(mode) {
       loadStatus();
     }
   }, 1000);
+}
+
+async function refreshCache() {
+  try {
+    const r = await api('POST', '/api/refresh-cache');
+    if (r.status === 'ok') {
+      toast('Cache reloaded from disk');
+      loadStatus();
+      loadFiles();
+    } else {
+      toast('No cached data found — run a scan first', true);
+    }
+  } catch (e) { toast(e.message, true); }
 }
 
 async function loadFiles() {
