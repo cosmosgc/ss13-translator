@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SS13 LLM Translate</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; font-size: 14px; background: #111; color: #ddd; }
+a { color: #58a6ff; }
+#status { background: #1a1a2e; padding: 8px 16px; display: flex; gap: 20px; align-items: center; border-bottom: 1px solid #333; font-size: 13px; flex-wrap: wrap; }
+#status .stat { color: #888; }
+#status .stat b { color: #ddd; }
+#status .badge { padding: 2px 8px; border-radius: 3px; font-size: 11px; }
+.badge-ok { background: #1a3a1a; color: #4caf50; }
+.badge-warn { background: #3a2a1a; color: #ff9800; }
+.badge-err { background: #3a1a1a; color: #f44336; }
+#main { display: flex; height: calc(100vh - 42px); }
+#sidebar { width: 360px; min-width: 260px; border-right: 1px solid #333; display: flex; flex-direction: column; }
+#sidebar-header { padding: 8px; border-bottom: 1px solid #333; display: flex; gap: 6px; flex-wrap: wrap; }
+#sidebar-header input { flex: 1; min-width: 100px; background: #222; border: 1px solid #444; color: #ddd; padding: 4px 8px; border-radius: 3px; }
+#sidebar-header select { background: #222; border: 1px solid #444; color: #ddd; padding: 4px; border-radius: 3px; }
+#file-list { flex: 1; overflow-y: auto; }
+.file-item { padding: 6px 8px; cursor: pointer; border-bottom: 1px solid #222; display: flex; justify-content: space-between; gap: 8px; }
+.file-item:hover { background: #1a1a2e; }
+.file-item.active { background: #1a2a3e; }
+.file-item .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-item .count { font-size: 11px; color: #666; white-space: nowrap; }
+.file-item .count .pending { color: #ff9800; }
+.file-item .count .done { color: #4caf50; }
+#content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+#content-header { padding: 8px 12px; border-bottom: 1px solid #333; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+#content-header h3 { font-size: 14px; font-weight: 600; }
+#content-header .actions { margin-left: auto; display: flex; gap: 6px; }
+#detail { flex: 1; overflow-y: auto; padding: 0; }
+.string-row { padding: 6px 12px 6px 6px; border-bottom: 1px solid #1a1a1a; display: flex; gap: 8px; }
+.string-row:hover { background: #161b22; }
+.string-row .sel { width: 20px; padding-top: 2px; }
+.string-row .sel input { accent-color: #4caf50; }
+.string-row .body { flex: 1; min-width: 0; }
+.string-row .body .meta { font-size: 11px; color: #666; margin-bottom: 2px; display: flex; gap: 8px; }
+.string-row .body .meta .status-badge { padding: 0 4px; border-radius: 2px; font-size: 10px; }
+.string-row .body .meta .status-badge.ORIGINAL { background: #2a2a00; color: #ff9800; }
+.string-row .body .meta .status-badge.TRANSLATED { background: #002a00; color: #4caf50; }
+.string-row .body .meta .status-badge.BROKEN { background: #2a0000; color: #f44336; }
+.string-row .body .current { color: #ddd; font-size: 14px; word-break: break-all; }
+.string-row .body .orig { color: #555; font-size: 11px; margin-top: 2px; word-break: break-all; }
+.string-row .body .issues { font-size: 11px; color: #f44336; margin-top: 2px; }
+.string-row .edit-area { display: none; margin-top: 4px; }
+.string-row .edit-area textarea { width: 100%; background: #222; border: 1px solid #555; color: #ddd; padding: 4px; border-radius: 3px; font-family: monospace; font-size: 13px; resize: vertical; min-height: 30px; }
+.string-row .edit-area .edit-actions { display: flex; gap: 4px; margin-top: 4px; }
+.empty { padding: 20px; text-align: center; color: #555; }
+button { background: #222; border: 1px solid #444; color: #ddd; padding: 4px 12px; border-radius: 3px; cursor: pointer; font-size: 12px; }
+button:hover { background: #333; }
+button.primary { background: #1a4a2a; border-color: #2a6a3a; }
+button.primary:hover { background: #2a5a3a; }
+button.danger { background: #4a1a1a; border-color: #6a2a2a; }
+button.danger:hover { background: #5a2a2a; }
+button:disabled { opacity: 0.4; cursor: default; }
+#toast { position: fixed; bottom: 20px; right: 20px; background: #1a1a2e; border: 1px solid #333; padding: 8px 16px; border-radius: 4px; font-size: 13px; display: none; z-index: 100; }
+.loading { opacity: 0.5; pointer-events: none; }
+</style>
+</head>
+<body>
+
+<div id="status">
+  <span class="stat">Files: <b id="s-files">-</b></span>
+  <span class="stat">Strings: <b id="s-strings">-</b></span>
+  <span class="stat">Pending: <b id="s-pending" style="color:#ff9800">-</b></span>
+  <span class="stat">Done: <b id="s-done" style="color:#4caf50">-</b></span>
+  <span class="stat">Broken: <b id="s-broken" style="color:#f44336">-</b></span>
+  <span id="llm-badge" class="badge badge-warn">LLM: ?</span>
+  <span style="margin-left:auto;display:flex;gap:6px">
+    <button onclick="scan('quick')">Quick Scan</button>
+    <button onclick="scan('hard')" style="background:#3a2a1a;border-color:#6a4a2a">Hard Scan</button>
+    <button onclick="checkLLM()">Check LLM</button>
+    <span id="scan-progress" style="font-size:11px;color:#666;line-height:24px"></span>
+  </span>
+</div>
+
+<div id="main">
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <input id="file-search" placeholder="Filter files..." oninput="loadFiles()">
+      <select id="file-scope" onchange="loadFiles()">
+        <option value="">All</option>
+        <option value="pending">Pending</option>
+        <option value="done">Done</option>
+      </select>
+    </div>
+    <div id="file-list"></div>
+  </div>
+  <div id="content">
+    <div id="content-header">
+      <h3 id="current-file">Select a file</h3>
+      <div class="actions">
+        <button id="btn-translate-selected" class="primary" onclick="translateSelected()" disabled>Xlate Selected</button>
+        <button id="btn-translate-file" onclick="translateFile()" disabled>Xlate File</button>
+        <button onclick="postprocFile()">Post-Proc</button>
+        <button onclick="showIssues()">Issues</button>
+      </div>
+    </div>
+    <div id="detail">
+      <div class="empty">Select a file from the sidebar to view its translatable strings</div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let state = { selectedFile: null, fileItems: {}, strings: [] };
+
+async function api(method, path, body) {
+  const opts = { method, headers: {} };
+  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
+  const resp = await fetch(path, opts);
+  if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error || resp.statusText); }
+  return resp.json();
+}
+
+function toast(msg, isError) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.style.display = 'block';
+  el.style.borderColor = isError ? '#f44336' : '#333';
+  setTimeout(() => el.style.display = 'none', 3000);
+}
+
+async function checkLLM() {
+  try {
+    const r = await api('GET', '/api/llm-check');
+    const badge = document.getElementById('llm-badge');
+    if (r.connected) { badge.textContent = 'LLM: OK'; badge.className = 'badge badge-ok'; }
+    else { badge.textContent = 'LLM: DOWN'; badge.className = 'badge badge-err'; }
+  } catch { document.getElementById('llm-badge').textContent = 'LLM: ERR'; }
+}
+
+async function loadStatus() {
+  try {
+    const r = await api('GET', '/api/status');
+    document.getElementById('s-files').textContent = r.files;
+    document.getElementById('s-strings').textContent = r.strings;
+    document.getElementById('s-pending').textContent = r.counts.ORIGINAL || 0;
+    document.getElementById('s-done').textContent = (r.counts.TRANSLATED || 0) + (r.counts.BROKEN || 0);
+    document.getElementById('s-broken').textContent = r.counts.BROKEN || 0;
+
+    const sp = r.scan_progress;
+    if (sp.phase && sp.phase !== 'done') {
+      document.getElementById('scan-progress').textContent = `${sp.phase} ${sp.done}/${sp.total}`;
+    } else {
+      document.getElementById('scan-progress').textContent = r.scan_done ? '' : 'scanning...';
+    }
+  } catch {}
+}
+
+async function scan(mode) {
+  const r = await api('POST', '/api/scan', { mode: mode || 'quick' });
+  if (r.status === 'already_running') {
+    toast('Scan already in progress, waiting...');
+  } else {
+    toast(r.mode === 'hard' ? 'Hard scan started' : 'Quick scan started');
+  }
+  const poll = setInterval(async () => {
+    const s = await api('GET', '/api/status');
+    if (s.scan_done) {
+      clearInterval(poll);
+      toast('Scan complete');
+      loadStatus();
+      loadFiles();
+    } else {
+      loadStatus();
+    }
+  }, 1000);
+}
+
+async function loadFiles() {
+  const q = document.getElementById('file-search').value;
+  const scope = document.getElementById('file-scope').value;
+  try {
+    const files = await api('GET', `/api/files?q=${encodeURIComponent(q)}&scope=${scope}`);
+    const el = document.getElementById('file-list');
+    el.innerHTML = '';
+    state.fileItems = {};
+    for (const f of files) {
+      state.fileItems[f.rel] = f;
+      const div = document.createElement('div');
+      div.className = 'file-item' + (f.rel === state.selectedFile ? ' active' : '');
+      div.innerHTML = `<span class="name">${f.rel}</span><span class="count"><span class="pending">${f.original}</span>/<span class="done">${f.translated}</span></span>`;
+      div.onclick = () => selectFile(f.rel);
+      el.appendChild(div);
+    }
+  } catch {}
+}
+
+async function selectFile(rel) {
+  state.selectedFile = rel;
+  document.querySelectorAll('.file-item').forEach(el => el.classList.remove('active'));
+  const items = document.getElementById('file-list').children;
+  for (const el of items) {
+    if (el.textContent.includes(rel)) { el.classList.add('active'); break; }
+  }
+  document.getElementById('current-file').textContent = rel;
+  document.getElementById('btn-translate-file').disabled = false;
+  document.getElementById('btn-translate-selected').disabled = true;
+
+  try {
+    const r = await api('GET', `/api/file/${encodeURIComponent(rel)}`);
+    renderStrings(r.strings);
+  } catch (e) { toast(e.message, true); }
+}
+
+function renderStrings(strings) {
+  const el = document.getElementById('detail');
+  el.innerHTML = '';
+  state.strings = strings || [];
+  if (!strings || strings.length === 0) {
+    el.innerHTML = '<div class="empty">No translatable strings in this file</div>';
+    return;
+  }
+  for (const s of strings) {
+    const div = document.createElement('div');
+    div.className = 'string-row';
+    const statusClass = s.status;
+    const statusLabel = s.status === 'ORIGINAL' ? 'ENGLISH' : s.status;
+    div.id = 'str-' + s.line_number;
+    div.innerHTML = `
+      <div class="sel"><input type="checkbox" data-line="${s.line_number}" ${s.status === 'BROKEN' ? 'disabled' : ''}></div>
+      <div class="body">
+        <div class="meta">
+          <span>L${s.line_number}</span>
+          <span class="status-badge ${statusClass}">${statusLabel}</span>
+          ${s.safe ? '' : '<span style="color:#f44336">UNSAFE</span>'}
+          <span style="margin-left:auto"><button class="edit-btn" data-line="${s.line_number}" onclick="toggleEdit(${s.line_number})">Edit</button></span>
+        </div>
+        <div class="current" id="cur-${s.line_number}">${escHtml(s.content)}</div>
+        <div class="orig">en: ${escHtml(s.original_content || '(no original)')}</div>
+        <div class="edit-area" id="edit-${s.line_number}">
+          <textarea id="ta-${s.line_number}">${escHtml(s.content)}</textarea>
+          <div class="edit-actions">
+            <button class="primary" onclick="saveEdit(${s.line_number})">Save</button>
+            <button onclick="cancelEdit(${s.line_number})">Cancel</button>
+          </div>
+        </div>
+        ${s.issues && s.issues.length ? '<div class="issues">' + s.issues.join('; ') + '</div>' : ''}
+      </div>
+    `;
+    el.appendChild(div);
+  }
+
+  // Enable "Translate Selected" when any checkbox is toggled
+  el.addEventListener('change', (e) => {
+    if (e.target.type === 'checkbox') updateSelectedButton();
+  });
+}
+
+function updateSelectedButton() {
+  const checked = document.querySelectorAll('#detail input[type=checkbox]:checked');
+  document.getElementById('btn-translate-selected').disabled = checked.length === 0;
+}
+
+function getSelectedStrings() {
+  const checked = document.querySelectorAll('#detail input[type=checkbox]:checked');
+  return Array.from(checked).map(cb => ({
+    file_rel: state.selectedFile,
+    line_number: parseInt(cb.dataset.line),
+  }));
+}
+
+function toggleEdit(lineno) {
+  document.getElementById('edit-' + lineno).style.display = 'block';
+  document.getElementById('ta-' + lineno).focus();
+}
+
+function cancelEdit(lineno) {
+  document.getElementById('edit-' + lineno).style.display = 'none';
+}
+
+async function saveEdit(lineno) {
+  const text = document.getElementById('ta-' + lineno).value;
+  try {
+    const r = await api('POST', '/api/edit', {
+      file_rel: state.selectedFile,
+      line_number: lineno,
+      text: text,
+    });
+    toast('Saved');
+    document.getElementById('edit-' + lineno).style.display = 'none';
+    document.getElementById('cur-' + lineno).textContent = escHtml(text);
+    // Update in-memory state
+    for (const s of state.strings) {
+      if (s.line_number === lineno) { s.content = text; break; }
+    }
+    loadStatus();
+  } catch (e) { toast(e.message, true); }
+}
+
+function escHtml(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function translateFile() {
+  if (!state.selectedFile) return;
+  document.getElementById('btn-translate-file').disabled = true;
+  try {
+    const r = await api('POST', '/api/translate', { scope: 'file', value: state.selectedFile });
+    toast(`Translating ${state.selectedFile}...`);
+    pollTranslateDone(() => {
+      document.getElementById('btn-translate-file').disabled = false;
+      selectFile(state.selectedFile);
+    });
+  } catch (e) {
+    toast(e.message, true);
+    document.getElementById('btn-translate-file').disabled = false;
+  }
+}
+
+async function translateSelected() {
+  const items = getSelectedStrings();
+  if (!items.length) return;
+  document.getElementById('btn-translate-selected').disabled = true;
+  try {
+    const r = await api('POST', '/api/translate/selected', { items });
+    toast(`Translating ${r.count} strings...`);
+    pollTranslateDone(() => {
+      document.getElementById('btn-translate-selected').disabled = false;
+      selectFile(state.selectedFile);
+    });
+  } catch (e) {
+    toast(e.message, true);
+    document.getElementById('btn-translate-selected').disabled = false;
+  }
+}
+
+function pollTranslateDone(callback) {
+  const poll = setInterval(async () => {
+    const p = await api('GET', '/api/progress');
+    if (!p.batch.running) {
+      clearInterval(poll);
+      toast('Translate complete');
+      loadStatus();
+      callback && callback();
+    } else {
+      document.getElementById('scan-progress').textContent = `translating ${p.batch.done}/${p.batch.total}`;
+    }
+  }, 500);
+}
+
+async function showIssues() {
+  try {
+    const issues = await api('GET', '/api/issues');
+    const el = document.getElementById('detail');
+    const file = document.getElementById('current-file');
+    file.textContent = `Issues (${issues.length})`;
+
+    el.innerHTML = '';
+    if (issues.length === 0) {
+      el.innerHTML = '<div class="empty">No issues found</div>';
+      return;
+    }
+    for (const s of issues) {
+      const div = document.createElement('div');
+      div.className = 'string-row';
+      div.innerHTML = `
+        <div class="meta">
+          <span>${s.file_rel}:L${s.line_number}</span>
+          <span class="status-badge BROKEN">${s.status}</span>
+        </div>
+        <div class="current">${escHtml(s.current)}</div>
+        <div class="orig">en: ${escHtml(s.original)}</div>
+        ${s.issues && s.issues.length ? '<div class="issues">' + s.issues.join('; ') + '</div>' : ''}
+      `;
+      div.onclick = () => selectFile(s.file_rel);
+      el.appendChild(div);
+    }
+  } catch (e) { toast(e.message, true); }
+}
+
+async function postprocFile() {
+  if (!state.selectedFile) return;
+  try {
+    const r = await api('POST', '/api/postproc', { scope: 'file', value: state.selectedFile });
+    toast(`Post-proc: ${r.fixed} fixes applied`);
+    if (r.fixed > 0) selectFile(state.selectedFile);
+    loadStatus();
+  } catch (e) { toast(e.message, true); }
+}
+
+// Keyboard shortcuts
+document.addEventListener('keydown', (e) => {
+  if (e.ctrlKey && e.key === 'Enter' && state.selectedFile) translateFile();
+});
+
+// Poll status
+setInterval(loadStatus, 2000);
+
+// Init
+checkLLM();
+loadStatus();
+loadFiles();
+</script>
+</body>
+</html>
